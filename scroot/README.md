@@ -15,6 +15,22 @@ This package contains a self-contained autonomous driving stack tailored for lig
 
 ## Quick Start
 
+### GUI workflow
+
+1. **Run the scooter desktop app** and follow the guided setup:
+
+   ```bash
+   python scooter_app.py
+   ```
+
+   The application scans your hardware, recommends the right model profile (lightweight/standard/performance), and downloads matching library versions. You can override the defaults at any time and re-run the setup if you swap hardware.
+
+2. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. Use **Stop Pilot** to end the run.
+
+### Command-line workflow
+
+If you prefer the CLI or need to run headless, you can still launch the pilot directly.
+
 1. **Install dependencies** (Python 3.10+ recommended):
 
    ```bash
