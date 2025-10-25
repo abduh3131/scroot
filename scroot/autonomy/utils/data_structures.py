@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 
@@ -46,6 +47,66 @@ class NavigationDecision:
     directive: str = ""
     caption: str = ""
     goal_context: str = ""
+
+
+class LaneType(str, Enum):
+    """Categorization of the surface the scooter is currently occupying."""
+
+    BIKE_LANE = "BIKE_LANE"
+    SIDEWALK = "SIDEWALK"
+    ROAD_EDGE = "ROAD_EDGE"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class ContextSnapshot:
+    """Aggregated scene context used by the safety advisor."""
+
+    lane_type: LaneType
+    confidence: float
+    sensor_confidence: float
+    recommended_bias: float
+    metadata: Dict[str, float] = field(default_factory=dict)
+
+
+class AdvisorVerdict(str, Enum):
+    """Advisor arbitration outcome."""
+
+    ALLOW = "ALLOW"
+    AMEND = "AMEND"
+    BLOCK = "BLOCK"
+
+
+@dataclass(frozen=True)
+class AdvisorReview:
+    """Advisor output that influences arbitration."""
+
+    verdict: AdvisorVerdict
+    reason_tags: Tuple[str, ...]
+    latency_ms: float
+    timestamp: float
+    amended_command: Optional["ActuatorCommand"] = None
+    safe_to_release: bool = False
+
+
+@dataclass(frozen=True)
+class SafetyCaps:
+    """Speed/clearance caps injected by the safety mindset or context policies."""
+
+    active: bool
+    max_speed_mps: float
+    min_clearance_m: float
+    source: str
+    profile: Optional[str] = None
+    annotations: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class NavigationSubGoal:
+    """Represents a temporary navigation focus (e.g., merge into bike lane)."""
+
+    goal_type: str
+    status: str
 
 
 @dataclass(frozen=True)
