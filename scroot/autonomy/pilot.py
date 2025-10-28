@@ -6,7 +6,7 @@ import signal
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -15,16 +15,32 @@ import numpy as np
 
 from autonomy.ai.advisor import AdvisorConfig, SituationalAdvisor
 from autonomy.ai.command_interface import CommandInterface
+from autonomy.control.arbitration import ControlArbiter
+from autonomy.control.companion import RidingCompanion
+from autonomy.control.config import (
+    AdvisorRuntimeConfig,
+    ContextConfig,
+    NavigationIntentConfig,
+    SafetyMindsetConfig,
+)
+from autonomy.control.context import ContextAnalyzer
 from autonomy.control.controller import Controller, ControllerConfig
+from autonomy.control.mindset import SafetyMindset
+from autonomy.control.telemetry import TelemetryLogger
 from autonomy.perception.object_detection import ObjectDetector, ObjectDetectorConfig
 from autonomy.planning.navigator import Navigator, NavigatorConfig
 from autonomy.sensors.camera import CameraSensor
 from autonomy.utils.data_structures import (
     ActuatorCommand,
     AdvisorDirective,
+    AdvisorReview,
+    ContextSnapshot,
     HighLevelCommand,
     NavigationDecision,
+    NavigationSubGoal,
     PerceptionSummary,
+    SafetyCaps,
+    VehicleEnvelope,
 )
 
 
@@ -47,6 +63,19 @@ class PilotConfig:
     command_state_path: Optional[Path] = Path("logs/command_state.json")
     initial_command: Optional[str] = None
     command_file: Optional[Path] = None
+    advisor: AdvisorRuntimeConfig = field(default_factory=AdvisorRuntimeConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
+    navigation_intent: NavigationIntentConfig = field(default_factory=NavigationIntentConfig)
+    safety_mindset: SafetyMindsetConfig = field(default_factory=SafetyMindsetConfig)
+    safety_mindset_enabled: bool = False
+    companion_persona: str = "calm_safe"
+    vehicle_description: str = "Scooter"
+    vehicle_width_m: float = 0.65
+    vehicle_length_m: float = 1.2
+    vehicle_height_m: float = 1.2
+    vehicle_clearance_margin_m: float = 0.2
+    calibration_reference_distance_m: float = 2.0
+    calibration_reference_pixels: float = 220.0
 
 
 class AutonomyPilot:
@@ -60,6 +89,16 @@ class AutonomyPilot:
             height=self.config.camera_height,
             fps=self.config.camera_fps,
         )
+        self._vehicle = VehicleEnvelope(
+            width_m=self.config.vehicle_width_m,
+            length_m=self.config.vehicle_length_m,
+            height_m=self.config.vehicle_height_m,
+            description=self.config.vehicle_description,
+            clearance_margin_m=self.config.vehicle_clearance_margin_m,
+            calibration_reference_distance_m=self.config.calibration_reference_distance_m,
+            calibration_reference_pixels=self.config.calibration_reference_pixels,
+        )
+
         self._detector = ObjectDetector(
             ObjectDetectorConfig(
                 model_name=self.config.model_name,
@@ -67,8 +106,9 @@ class AutonomyPilot:
                 iou_threshold=self.config.iou_threshold,
             )
         )
-        self._navigator = Navigator(NavigatorConfig())
-        self._controller = Controller(ControllerConfig())
+        self._navigator = Navigator(NavigatorConfig(), vehicle=self._vehicle)
+        self._controller_config = ControllerConfig()
+        self._controller = Controller(self._controller_config)
         self._advisor = None
         if self.config.advisor_enabled:
             advisor_config = AdvisorConfig(
@@ -85,9 +125,31 @@ class AutonomyPilot:
         self._running = False
         self._latest_decision: Optional[NavigationDecision] = None
         self._latest_directive: Optional[AdvisorDirective] = None
+        self._latest_review: Optional[AdvisorReview] = None
+        self._latest_context: Optional[ContextSnapshot] = None
+        self._latest_caps: Optional[SafetyCaps] = None
+        self._latest_subgoal: Optional[NavigationSubGoal] = None
+        self._latest_companion: Optional[str] = None
 
         if self.config.visualize or self.config.advisor_state_path or self.config.command_state_path:
             self.config.log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Safety mindset toggle
+        if self.config.safety_mindset_enabled:
+            self.config.safety_mindset.enabled = True
+
+        self._context_analyzer = ContextAnalyzer(self.config.context, self.config.navigation_intent)
+        self._mindset = SafetyMindset(self.config.safety_mindset, vehicle=self._vehicle)
+        self._arbiter = ControlArbiter(
+            advisor_config=self.config.advisor,
+            context_config=self.config.context,
+            intent_config=self.config.navigation_intent,
+            max_vehicle_speed=self._controller_config.max_speed_mps,
+            vehicle=self._vehicle,
+            enabled=self.config.advisor_enabled,
+        )
+        self._telemetry = TelemetryLogger(self.config.log_dir)
+        self._companion = RidingCompanion(persona=self.config.companion_persona)
 
     @property
     def latest_decision(self) -> Optional[NavigationDecision]:
@@ -96,6 +158,26 @@ class AutonomyPilot:
     @property
     def latest_directive(self) -> Optional[AdvisorDirective]:
         return self._latest_directive
+
+    @property
+    def latest_review(self) -> Optional[AdvisorReview]:
+        return self._latest_review
+
+    @property
+    def latest_context(self) -> Optional[ContextSnapshot]:
+        return self._latest_context
+
+    @property
+    def latest_caps(self) -> Optional[SafetyCaps]:
+        return self._latest_caps
+
+    @property
+    def latest_subgoal(self) -> Optional[NavigationSubGoal]:
+        return self._latest_subgoal
+
+    @property
+    def latest_companion(self) -> Optional[str]:
+        return self._latest_companion
 
     def run(self) -> Iterator[ActuatorCommand]:
         logging.info("Starting autonomous pilot loop")
@@ -130,10 +212,50 @@ class AutonomyPilot:
                 if advisor_directive.enforced_stop:
                     decision = replace(decision, desired_speed=0.0, hazard_level=1.0)
 
-            command = self._controller.command(decision)
+            proposed_command = self._controller.command(decision)
+
+            scene_context = self._context_analyzer.analyze(decision)
+            caps = self._mindset.evaluate(scene_context.snapshot, decision)
+            has_goal = bool(current_command and current_command.command_type != "stop")
+            ambient_mode = self.config.navigation_intent.ambient_mode
+
+            tick_time = time.time()
+            arbitration = self._arbiter.step(
+                timestamp=tick_time,
+                perception_objects=perception_summary.objects,
+                decision=decision,
+                proposed=proposed_command,
+                context=scene_context.snapshot,
+                caps=caps,
+                has_goal=has_goal,
+                ambient_mode=ambient_mode,
+                subgoal_hint=scene_context.subgoal_hint,
+            )
+
+            command = arbitration.final_command
+            review = arbitration.review
+            companion_message = self._companion.narrate(review)
+
+            self._telemetry.record(
+                timestamp=tick_time,
+                decision=decision,
+                proposed=proposed_command,
+                result=command,
+                review=review,
+                caps=caps,
+                context=scene_context.snapshot,
+                gate_tags=arbitration.gate_tags,
+                subgoal=arbitration.subgoal,
+                companion_message=companion_message,
+            )
 
             self._latest_decision = decision
             self._latest_directive = advisor_directive
+            self._latest_review = review
+            self._latest_context = scene_context.snapshot
+            self._latest_caps = caps
+            self._latest_subgoal = arbitration.subgoal
+            self._latest_companion = companion_message
 
             if self.config.visualize:
                 self._visualize(frame, perception_summary, decision, command)
@@ -182,6 +304,10 @@ class AutonomyPilot:
             f"throttle={command.throttle:.2f}",
             f"brake={command.brake:.2f}",
         ]
+        if self._latest_review:
+            text_lines.append(
+                f"advisor={self._latest_review.verdict.value} ({','.join(self._latest_review.reason_tags)})"
+            )
         if decision.directive:
             text_lines.append(f"advisor: {decision.directive}")
         text_lines.append(f"goal: {decision.goal_context}")
@@ -258,12 +384,67 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
     parser.add_argument("--command-file", default=None, help="Path to a file containing operator commands")
     parser.add_argument("--advisor-state", default="logs/advisor_state.json", help="Where to export advisor decisions")
     parser.add_argument("--command-state", default="logs/command_state.json", help="Where to export parsed commands")
+    parser.add_argument("--advisor-mode", choices=["strict", "normal"], default="normal")
+    parser.add_argument("--safety-mindset", choices=["on", "off"], default="off")
+    parser.add_argument("--ambient", choices=["on", "off"], default="on")
+    parser.add_argument(
+        "--persona",
+        choices=["calm_safe", "smart_scout", "playful"],
+        default="calm_safe",
+        help="Narration persona for the riding companion",
+    )
+    parser.add_argument("--vehicle-description", default="Scooter", help="Describe the platform for logs")
+    parser.add_argument("--vehicle-width", type=float, default=0.65, help="Vehicle width in meters")
+    parser.add_argument("--vehicle-length", type=float, default=1.2, help="Vehicle length in meters")
+    parser.add_argument("--vehicle-height", type=float, default=1.2, help="Vehicle height in meters")
+    parser.add_argument(
+        "--clearance-margin",
+        type=float,
+        default=0.2,
+        help="Extra lateral margin in meters on each side",
+    )
+    parser.add_argument(
+        "--calibration-distance",
+        type=float,
+        default=2.0,
+        help="Reference distance in meters used to approximate depth",
+    )
+    parser.add_argument(
+        "--calibration-pixels",
+        type=float,
+        default=220.0,
+        help="Pixel width of the vehicle at the calibration distance",
+    )
 
     args = parser.parse_args(argv)
+
+    if args.vehicle_width <= 0 or args.vehicle_length <= 0 or args.vehicle_height <= 0:
+        parser.error("Vehicle dimensions must be greater than zero.")
+    if args.clearance_margin < 0:
+        parser.error("--clearance-margin cannot be negative")
+    if args.calibration_distance <= 0 or args.calibration_pixels <= 0:
+        parser.error("Calibration distance/pixels must be positive")
 
     command_file = Path(args.command_file).expanduser() if args.command_file else None
     advisor_state_path = Path(args.advisor_state).expanduser() if args.advisor_state else None
     command_state_path = Path(args.command_state).expanduser() if args.command_state else None
+
+    advisor_settings = AdvisorRuntimeConfig()
+    if args.advisor_mode == "strict":
+        advisor_settings.mode = "strict"
+        advisor_settings.min_conf_for_allow = 0.7
+        advisor_settings.ttc_block_s = 1.5
+        advisor_settings.block_debounce_ms = 1000
+        advisor_settings.timeout_grace_ticks = 0
+    else:
+        advisor_settings.mode = "normal"
+
+    context_settings = ContextConfig()
+    navigation_intent = NavigationIntentConfig()
+    navigation_intent.ambient_mode = args.ambient == "on"
+
+    safety_mindset = SafetyMindsetConfig()
+    safety_mindset.enabled = args.safety_mindset == "on"
 
     return PilotConfig(
         camera_source=args.camera,
@@ -283,6 +464,19 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
         command_state_path=command_state_path,
         initial_command=args.command,
         command_file=command_file,
+        advisor=advisor_settings,
+        context=context_settings,
+        navigation_intent=navigation_intent,
+        safety_mindset=safety_mindset,
+        safety_mindset_enabled=safety_mindset.enabled,
+        companion_persona=args.persona,
+        vehicle_description=args.vehicle_description,
+        vehicle_width_m=args.vehicle_width,
+        vehicle_length_m=args.vehicle_length,
+        vehicle_height_m=args.vehicle_height,
+        vehicle_clearance_margin_m=args.clearance_margin,
+        calibration_reference_distance_m=args.calibration_distance,
+        calibration_reference_pixels=args.calibration_pixels,
     )
 
 
