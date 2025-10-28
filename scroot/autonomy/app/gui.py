@@ -8,7 +8,11 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
-from autonomy.app.environment import EnvironmentPlan, install_dependencies
+from autonomy.app.environment import (
+    install_dependencies,
+    load_environment_status,
+    resolve_environment_plan,
+)
 from autonomy.app.hardware import detect_hardware
 from autonomy.app.profiles import DEPENDENCY_PROFILES, MODEL_PROFILES, recommend_profiles
 from autonomy.app.state import AppState, AppStateManager
@@ -434,7 +438,8 @@ class ScooterApp(tk.Tk):
 
     def _install_dependencies(self) -> None:
         dependency_profile = DEPENDENCY_PROFILES[self.dependency_var.get()]
-        plan = EnvironmentPlan(dependency_profile=dependency_profile)
+        status = load_environment_status()
+        plan = resolve_environment_plan(dependency_profile, status=status)
 
         self.install_button.configure(state=tk.DISABLED)
         self._append_setup_log("Starting dependency installation...")
@@ -446,6 +451,14 @@ class ScooterApp(tk.Tk):
                 self.after(0, lambda: messagebox.showerror("Install", report.error or "Installation failed"))
             else:
                 self._append_setup_log("Installation succeeded.")
+                self._append_setup_log(
+                    f"Interpreter: {report.plan.python_executable}"
+                    + (
+                        f" (virtualenv {report.plan.venv_path})"
+                        if report.plan.venv_path
+                        else ""
+                    )
+                )
                 self.after(0, lambda: messagebox.showinfo("Install", "Dependencies installed."))
             self.after(0, lambda: self.install_button.configure(state=tk.NORMAL))
 

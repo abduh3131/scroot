@@ -26,7 +26,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
    python scooter_app.py
    ```
 
-   The application now bootstraps itself: it scans your hardware, detects whether you are running native Ubuntu, Ubuntu-on-WSL, or Jetson JetPack, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
+   The application now bootstraps itself: it scans your hardware, detects whether you are running native Ubuntu, Ubuntu-on-WSL, or Jetson JetPack, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. If the host Python refuses system-wide installs (PEP 668 “externally managed environment”), the bootstrapper automatically provisions `.venv/` and re-runs the install inside that sandbox so the GUI still opens with a single command. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
 
 2. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. Use **Stop Pilot** to end the run. The launch controls expose Advisor mode (normal/strict), Safety Mindset toggle, Ambient cruising, and Riding Companion persona—tweak them to match the environment before launching.
 
@@ -45,6 +45,15 @@ If the host changes (e.g., you move the SD card to a different Jetson or upgrade
 If you prefer the CLI or need to run headless, you can still launch the pilot directly.
 
 1. **Install dependencies** (Python 3.10+ recommended):
+
+   The easiest path is to reuse the managed environment that the GUI bootstrapper creates.
+
+   ```bash
+   python setup_scroot.py --skip-models  # installs into .venv/
+   source .venv/bin/activate             # or .venv\Scripts\activate on Windows
+   ```
+
+   If you prefer to drive pip manually, run the commands below *inside* that virtual environment so you avoid PEP 668 restrictions:
 
    ```bash
    python -m pip install --upgrade pip

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 from typing import Callable, Optional
 
 from autonomy.app.environment import (
-    EnvironmentPlan,
     install_dependencies,
     load_environment_status,
+    resolve_environment_plan,
 )
 from autonomy.app.hardware import detect_hardware
 from autonomy.app.profiles import DEPENDENCY_PROFILES, recommend_profiles
@@ -69,13 +68,12 @@ def auto_prepare_environment(logger: Optional[Callable[[str], None]] = None) -> 
 
     dependency_profile = DEPENDENCY_PROFILES[app_state.dependency_profile]
 
-    plan = EnvironmentPlan(
-        dependency_profile=dependency_profile,
-        python_executable=sys.executable,
-        extra_args=dependency_profile.pip_args,
-    )
-
     status = load_environment_status()
+    plan = resolve_environment_plan(dependency_profile, status=status)
+    if plan.venv_path:
+        log(f"Using managed virtual environment at {plan.venv_path}.")
+    else:
+        log(f"Using interpreter {plan.python_executable} for dependency management.")
     if status and status.matches_plan(plan):
         log(
             "Dependency profile '%s' already installed (last setup %s)."
