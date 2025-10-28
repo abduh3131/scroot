@@ -26,7 +26,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
    python scooter_app.py
    ```
 
-   The application scans your hardware, recommends the right model profile (lightweight/standard/performance), and downloads matching library versions. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
+   The application now bootstraps itself: it scans your hardware, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
 
 2. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. Use **Stop Pilot** to end the run. The launch controls expose Advisor mode (normal/strict), Safety Mindset toggle, Ambient cruising, and Riding Companion persona—tweak them to match the environment before launching.
 

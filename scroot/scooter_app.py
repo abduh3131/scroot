@@ -6,7 +6,7 @@ from autonomy.app import launch_app
 
 
 def main() -> None:  # pragma: no cover - UI entry
-    launch_app()
+    launch_app(auto_prepare=True)
 
 
 if __name__ == "__main__":  # pragma: no cover

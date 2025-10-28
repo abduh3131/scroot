@@ -6,10 +6,14 @@ import json
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 from autonomy.app.profiles import DependencyProfile
+
+
+STATUS_PATH = Path("config") / "environment_status.json"
 
 
 @dataclass(slots=True)
@@ -21,6 +25,7 @@ class EnvironmentPlan:
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         payload["dependency_profile"] = self.dependency_profile.key
+        payload["extra_args"] = list(self.extra_args)
         return payload
 
 
@@ -29,6 +34,50 @@ class EnvironmentReport:
     executed: bool
     log_path: Path
     error: Optional[str] = None
+
+
+@dataclass(slots=True)
+class EnvironmentStatus:
+    profile_key: str
+    python_executable: str
+    extra_args: tuple[str, ...]
+    installed_at: str
+    log_path: Path
+
+    def to_json(self) -> str:
+        payload = {
+            "profile_key": self.profile_key,
+            "python_executable": self.python_executable,
+            "extra_args": list(self.extra_args),
+            "installed_at": self.installed_at,
+            "log_path": str(self.log_path),
+        }
+        return json.dumps(payload, indent=2)
+
+    def matches_plan(self, plan: EnvironmentPlan) -> bool:
+        return (
+            self.profile_key == plan.dependency_profile.key
+            and self.python_executable == plan.python_executable
+            and tuple(self.extra_args) == tuple(plan.extra_args)
+        )
+
+
+def load_environment_status(path: Path = STATUS_PATH) -> Optional[EnvironmentStatus]:
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return EnvironmentStatus(
+        profile_key=data.get("profile_key", ""),
+        python_executable=data.get("python_executable", sys.executable),
+        extra_args=tuple(data.get("extra_args", [])),
+        installed_at=data.get("installed_at", ""),
+        log_path=Path(data.get("log_path", "logs/setup_install.log")),
+    )
+
+
+def save_environment_status(status: EnvironmentStatus, path: Path = STATUS_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(status.to_json(), encoding="utf-8")
 
 
 def install_dependencies(plan: EnvironmentPlan, logger: Callable[[str], None]) -> EnvironmentReport:
@@ -56,4 +105,13 @@ def install_dependencies(plan: EnvironmentPlan, logger: Callable[[str], None]) -
             return EnvironmentReport(executed=False, log_path=log_path, error=str(exc))
 
     logger("Dependency installation complete.")
+    status = EnvironmentStatus(
+        profile_key=plan.dependency_profile.key,
+        python_executable=plan.python_executable,
+        extra_args=plan.extra_args,
+        installed_at=datetime.now(timezone.utc).isoformat(),
+        log_path=log_path,
+    )
+    save_environment_status(status)
+
     return EnvironmentReport(executed=True, log_path=log_path)

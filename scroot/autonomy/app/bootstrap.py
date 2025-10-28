@@ -1,0 +1,85 @@
+"""Bootstrap helpers to prepare the GUI runtime automatically."""
+
+from __future__ import annotations
+
+import sys
+from typing import Callable, Optional
+
+from autonomy.app.environment import (
+    EnvironmentPlan,
+    install_dependencies,
+    load_environment_status,
+)
+from autonomy.app.hardware import detect_hardware
+from autonomy.app.profiles import DEPENDENCY_PROFILES, recommend_profiles
+from autonomy.app.state import AppState, AppStateManager
+
+
+def _default_logger(message: str) -> None:
+    print(f"[bootstrap] {message}")
+
+
+def auto_prepare_environment(logger: Optional[Callable[[str], None]] = None) -> None:
+    """Ensure hardware is profiled and dependencies are installed before launching the GUI."""
+
+    log = logger or _default_logger
+
+    state_manager = AppStateManager()
+
+    hardware = state_manager.load_hardware()
+    if hardware is None:
+        log("Detecting hardware capabilities...")
+        hardware = detect_hardware()
+        state_manager.save_hardware(hardware)
+        log(
+            "Detected hardware: "
+            f"CPU={hardware.cpu_model} cores={hardware.cpu_count} memory={hardware.total_memory_gb}GB"
+        )
+        if hardware.gpu_name:
+            log(f"GPU={hardware.gpu_name} (CUDA={'yes' if hardware.has_cuda else 'no'})")
+        log(f"Compute tier classified as '{hardware.compute_tier}'.")
+    else:
+        log("Using cached hardware profile.")
+
+    recommended_model, recommended_dep = recommend_profiles(hardware)
+
+    app_state = state_manager.load_state()
+    if app_state is None:
+        log("Initializing application state with recommended defaults.")
+        app_state = AppState.default(recommended_model, recommended_dep)
+        state_manager.save_state(app_state)
+    else:
+        log("Loaded existing application state.")
+        if app_state.dependency_profile not in DEPENDENCY_PROFILES:
+            log(
+                "Stored dependency profile is unknown; switching to recommended profile "
+                f"'{recommended_dep.key}'."
+            )
+            app_state.dependency_profile = recommended_dep.key
+            state_manager.save_state(app_state)
+
+    dependency_profile = DEPENDENCY_PROFILES[app_state.dependency_profile]
+
+    plan = EnvironmentPlan(
+        dependency_profile=dependency_profile,
+        python_executable=sys.executable,
+    )
+
+    status = load_environment_status()
+    if status and status.matches_plan(plan):
+        log(
+            "Dependency profile '%s' already installed (last setup %s)."
+            % (dependency_profile.key, status.installed_at or "unknown")
+        )
+        log(f"See log output at {status.log_path}.")
+        return
+
+    log(f"Installing dependency profile '{dependency_profile.key}'...")
+    report = install_dependencies(plan, logger=log)
+    if report.error:
+        raise RuntimeError(
+            "Automatic dependency installation failed; "
+            f"check {report.log_path} for details: {report.error}"
+        )
+    log("Dependency installation completed successfully.")
+
