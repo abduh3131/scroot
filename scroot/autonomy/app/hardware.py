@@ -7,7 +7,7 @@ import os
 import platform
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -34,9 +34,11 @@ class HardwareProfile:
     has_cuda: bool
     gpu_name: Optional[str]
     compute_tier: str
+    distro_name: str = ""
+    environment: str = "unknown"
 
     def to_json(self) -> str:
-        return json.dumps(self.__dict__, indent=2)
+        return json.dumps(asdict(self), indent=2)
 
 
 def _read_cpu_model() -> str:
@@ -105,6 +107,46 @@ def classify_compute_tier(cpu_count: int, memory_gb: float, has_cuda: bool) -> s
     return "lightweight"
 
 
+def _detect_linux_distribution() -> str:
+    os_release = Path("/etc/os-release")
+    if os_release.exists():
+        data: dict[str, str] = {}
+        for line in os_release.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key.strip()] = value.strip().strip('"')
+        name = data.get("PRETTY_NAME")
+        if name:
+            return name
+        if data.get("NAME") and data.get("VERSION_ID"):
+            return f"{data['NAME']} {data['VERSION_ID']}"
+        if data.get("NAME"):
+            return data["NAME"]
+    return ""
+
+
+def _detect_environment(os_name: str, distro_name: str) -> str:
+    if os_name == "Linux":
+        uname = platform.uname()
+        release = platform.release().lower()
+        if os.environ.get("WSL_DISTRO_NAME") or "microsoft" in release:
+            return "wsl"
+        machine = uname.machine.lower()
+        if "tegra" in machine or "jetson" in machine:
+            return "jetson"
+        if Path("/etc/nv_tegra_release").exists():
+            return "jetson"
+        if "jetson" in distro_name.lower():
+            return "jetson"
+        return "linux_native"
+    if os_name == "Windows":
+        return "windows"
+    if os_name == "Darwin":
+        return "mac"
+    return os_name.lower() or "unknown"
+
+
 def detect_hardware() -> HardwareProfile:
     """Gather CPU, memory, GPU, and OS information."""
 
@@ -115,6 +157,8 @@ def detect_hardware() -> HardwareProfile:
     memory_gb = _compute_memory_gb()
     has_cuda, gpu_name = _detect_gpu()
     tier = classify_compute_tier(cpu_count, memory_gb, has_cuda)
+    distro_name = _detect_linux_distribution() if os_name == "Linux" else platform.platform()
+    environment = _detect_environment(os_name, distro_name)
 
     return HardwareProfile(
         os_name=os_name,
@@ -125,6 +169,8 @@ def detect_hardware() -> HardwareProfile:
         has_cuda=has_cuda,
         gpu_name=gpu_name,
         compute_tier=tier,
+        distro_name=distro_name,
+        environment=environment,
     )
 
 
@@ -136,4 +182,19 @@ def load_hardware_profile(path: Path) -> Optional[HardwareProfile]:
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    return HardwareProfile(**data)
+    defaults: dict[str, object] = {
+        "os_name": platform.system(),
+        "os_version": platform.version(),
+        "cpu_model": platform.processor() or "Unknown CPU",
+        "cpu_count": os.cpu_count() or 1,
+        "total_memory_gb": 0.0,
+        "has_cuda": False,
+        "gpu_name": None,
+        "compute_tier": "lightweight",
+        "distro_name": "",
+        "environment": "unknown",
+    }
+    defaults.update(data)
+    defaults["cpu_count"] = int(defaults.get("cpu_count", 1))
+    defaults["total_memory_gb"] = float(defaults.get("total_memory_gb", 0.0))
+    return HardwareProfile(**defaults)

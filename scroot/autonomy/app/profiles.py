@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from autonomy.app.hardware import HardwareProfile
 
@@ -24,6 +24,7 @@ class DependencyProfile:
     label: str
     description: str
     requirements: List[str]
+    pip_args: Tuple[str, ...] = ()
 
 
 MODEL_PROFILES: Dict[str, ModelProfile] = {
@@ -87,6 +88,26 @@ DEPENDENCY_PROFILES: Dict[str, DependencyProfile] = {
             "psutil>=5.9.0",
         ],
     ),
+    "jetson": DependencyProfile(
+        key="jetson",
+        label="Jetson Ubuntu Stack",
+        description="Prepares wheels compatible with NVIDIA Jetson devices running Ubuntu-based JetPack releases.",
+        requirements=[
+            "ultralytics==8.0.196",
+            "opencv-python==4.7.0.72",
+            "torch==2.0.0",
+            "torchvision==0.15.1",
+            "transformers==4.36.0",
+            "accelerate==0.24.1",
+            "sentencepiece==0.1.99",
+            "safetensors==0.3.1",
+            "psutil>=5.9.0",
+        ],
+        pip_args=(
+            "--extra-index-url",
+            "https://developer.download.nvidia.com/compute/redist/jp/v512",
+        ),
+    ),
     "performance": DependencyProfile(
         key="performance",
         label="Performance GPU Stack",
@@ -122,14 +143,28 @@ DEFAULT_DEPENDENCIES_BY_OS = {
 }
 
 
+DEFAULT_DEPENDENCIES_BY_ENVIRONMENT = {
+    "jetson": DEPENDENCY_PROFILES["jetson"],
+    "wsl": DEPENDENCY_PROFILES["modern"],
+    "linux_native": DEPENDENCY_PROFILES["modern"],
+    "windows": DEPENDENCY_PROFILES["legacy"],
+    "mac": DEPENDENCY_PROFILES["modern"],
+}
+
+
 def recommend_profiles(profile: HardwareProfile) -> tuple[ModelProfile, DependencyProfile]:
     model_profile = DEFAULT_MODEL_BY_TIER.get(profile.compute_tier, MODEL_PROFILES["lightweight"])
 
+    if profile.environment == "jetson":
+        model_profile = MODEL_PROFILES["standard"]
+
     dep_profile = DEPENDENCY_PROFILES["modern"]
-    if profile.os_name in DEFAULT_DEPENDENCIES_BY_OS:
+    if profile.environment in DEFAULT_DEPENDENCIES_BY_ENVIRONMENT:
+        dep_profile = DEFAULT_DEPENDENCIES_BY_ENVIRONMENT[profile.environment]
+    elif profile.os_name in DEFAULT_DEPENDENCIES_BY_OS:
         dep_profile = DEFAULT_DEPENDENCIES_BY_OS[profile.os_name]
 
-    if profile.has_cuda and profile.compute_tier == "performance":
+    if profile.has_cuda and profile.compute_tier == "performance" and profile.environment != "jetson":
         dep_profile = DEPENDENCY_PROFILES["performance"]
 
     return model_profile, dep_profile

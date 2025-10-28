@@ -26,9 +26,19 @@ This package contains a self-contained autonomous driving stack tailored for lig
    python scooter_app.py
    ```
 
-   The application now bootstraps itself: it scans your hardware, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
+   The application now bootstraps itself: it scans your hardware, detects whether you are running native Ubuntu, Ubuntu-on-WSL, or Jetson JetPack, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
 
 2. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. Use **Stop Pilot** to end the run. The launch controls expose Advisor mode (normal/strict), Safety Mindset toggle, Ambient cruising, and Riding Companion persona—tweak them to match the environment before launching.
+
+### Automated environment detection
+
+The one-line launcher (`python scooter_app.py`) always performs a fresh scan before the GUI appears. The bootstrapper logs the detected environment and selects the matching dependency profile automatically:
+
+- **Jetson (JetPack / L4T)** – Uses the Jetson-optimized dependency stack and NVIDIA's Python wheel index so PyTorch/OpenCV align with the JetPack image.
+- **Ubuntu on WSL** – Uses the modern Linux stack but flags the runtime as WSL so you can enable GPU pass-through or USB forwarding as needed.
+- **Native Ubuntu / desktop OS** – Classifies the compute tier (lightweight/standard/performance) and installs the corresponding CPU/GPU libraries.
+
+If the host changes (e.g., you move the SD card to a different Jetson or upgrade your workstation), the cached profile is refreshed automatically at startup.
 
 ### Command-line workflow
 

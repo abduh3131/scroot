@@ -26,20 +26,29 @@ def auto_prepare_environment(logger: Optional[Callable[[str], None]] = None) -> 
 
     state_manager = AppStateManager()
 
-    hardware = state_manager.load_hardware()
-    if hardware is None:
-        log("Detecting hardware capabilities...")
-        hardware = detect_hardware()
-        state_manager.save_hardware(hardware)
-        log(
-            "Detected hardware: "
-            f"CPU={hardware.cpu_model} cores={hardware.cpu_count} memory={hardware.total_memory_gb}GB"
-        )
-        if hardware.gpu_name:
-            log(f"GPU={hardware.gpu_name} (CUDA={'yes' if hardware.has_cuda else 'no'})")
-        log(f"Compute tier classified as '{hardware.compute_tier}'.")
+    log("Scanning host hardware and operating system...")
+    cached_hardware = state_manager.load_hardware()
+    hardware = detect_hardware()
+    state_manager.save_hardware(hardware)
+
+    if cached_hardware and cached_hardware != hardware:
+        log("Hardware profile changed since last launch; refreshing recommendations.")
+
+    distro_label = hardware.distro_name or hardware.os_version
+    log(
+        "Environment detected: %s (%s variant=%s)" %
+        (hardware.os_name, distro_label, hardware.environment)
+    )
+    log(
+        "CPU=%s cores=%s memory=%sGB" %
+        (hardware.cpu_model, hardware.cpu_count, hardware.total_memory_gb)
+    )
+    if hardware.gpu_name:
+        log(f"GPU={hardware.gpu_name} (CUDA={'yes' if hardware.has_cuda else 'no'})")
     else:
-        log("Using cached hardware profile.")
+        log(f"GPU=none (CUDA={'yes' if hardware.has_cuda else 'no'})")
+    log(f"Compute tier classified as '{hardware.compute_tier}'.")
+    log("Profile data cached to speed up future launches.")
 
     recommended_model, recommended_dep = recommend_profiles(hardware)
 
@@ -63,6 +72,7 @@ def auto_prepare_environment(logger: Optional[Callable[[str], None]] = None) -> 
     plan = EnvironmentPlan(
         dependency_profile=dependency_profile,
         python_executable=sys.executable,
+        extra_args=dependency_profile.pip_args,
     )
 
     status = load_environment_status()
