@@ -47,8 +47,8 @@ Central orchestrator that binds sensors, perception, navigation, advisor, and co
 - Feeding `NavigationDecision` objects into the `Controller` for smoothing and actuator scaling.
 - Persisting telemetry JSON and optional visualization overlays.
 
-### `autonomy/sensors/camera.py`
-Defines `CameraSensor`, a thin wrapper around OpenCV’s `VideoCapture` that exposes a frame iterator with resolution/FPS controls and lifecycle management tailored for USB cameras.
+### `camera_autopilot.py`
+Self-contained camera discovery and recovery module. It enumerates `/dev/video*`, probes MJPEG/YUYV modes, chooses the first configuration that yields real frames, and restarts or switches devices automatically when the capture stalls. Exposes a `CameraHandle` with `start()`, `frames()`, `get_frame()`, `stats()`, and `stop()`.
 
 ### `autonomy/perception/object_detection.py`
 Wraps Ultralytics YOLO to produce `PerceptionSummary` objects containing detections, obstacle density metrics, and frame metadata. Configuration toggles allow adjusting model name, confidence, and IoU thresholds.
@@ -86,7 +86,7 @@ The single entry point for operators. Responsibilities:
 ## Data Flow Summary
 
 1. `autonomy_launcher.py` constructs `AutonomyPilot` using CLI-specified configuration.
-2. `CameraSensor` streams frames. `ObjectDetector` converts them into detection lists.
+2. `Camera Autopilot` streams frames. `ObjectDetector` converts them into detection lists.
 3. `CommandInterface` delivers the latest high-level goal (if any).
 4. `Navigator` evaluates detections plus goals to produce steering/speed intents.
 5. `SituationalAdvisor` (optional) analyzes frames and detections to append directives or trigger stops.
