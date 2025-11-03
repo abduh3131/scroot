@@ -23,6 +23,7 @@ class AppState:
     resolution_width: int
     resolution_height: int
     fps: int
+    device_preference: str
     enable_visualization: bool
     enable_advisor: bool
     advisor_mode: str
@@ -55,10 +56,11 @@ class AppState:
             model_profile=model_profile.key,
             dependency_profile=dependency_profile.key,
             advisor_model_profile=advisor_profile_key,
-            camera_source="0",
-            resolution_width=1280,
-            resolution_height=720,
+            camera_source="auto",
+            resolution_width=640,
+            resolution_height=480,
             fps=30,
+            device_preference="auto",
             enable_visualization=True,
             enable_advisor=True,
             advisor_mode="normal",
@@ -98,6 +100,7 @@ class AppStateManager:
         data.setdefault("safety_mindset", "off")
         data.setdefault("ambient_mode", "on")
         data.setdefault("persona", "calm_safe")
+        data.setdefault("device_preference", "auto")
         data.setdefault("vehicle_description", "Scooter")
         data.setdefault("vehicle_width_m", 0.65)
         data.setdefault("vehicle_length_m", 1.2)

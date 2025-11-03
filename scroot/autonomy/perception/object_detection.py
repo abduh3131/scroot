@@ -14,6 +14,7 @@ except ImportError as exc:  # pragma: no cover - handled at runtime
     ) from exc
 
 from autonomy.utils.data_structures import DetectedObject, PerceptionSummary
+from autonomy.runtime.runtime_guard import current_device
 
 
 @dataclass
@@ -23,13 +24,30 @@ class ObjectDetectorConfig:
     iou_threshold: float = 0.4
 
 
+_MODEL_CACHE: dict[str, YOLO] = {}
+
+
 class ObjectDetector:
     """Thin wrapper around the Ultralytics YOLO models."""
 
     def __init__(self, config: ObjectDetectorConfig | None = None) -> None:
         self.config = config or ObjectDetectorConfig()
-        self._model = YOLO(self.config.model_name)
-        self._model.fuse()
+        device = current_device() or "cpu"
+        cached = _MODEL_CACHE.get(self.config.model_name)
+        if cached is None:
+            model = YOLO(self.config.model_name)
+            try:
+                model.fuse()
+            except Exception:  # pragma: no cover - fuse optional
+                pass
+            try:
+                model.to(device)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            _MODEL_CACHE[self.config.model_name] = model
+            cached = model
+        self._model = cached
+        self._device = device
 
     def detect(self, frame: np.ndarray) -> PerceptionSummary:
         results = self._model.predict(
@@ -37,6 +55,7 @@ class ObjectDetector:
             conf=self.config.confidence_threshold,
             iou=self.config.iou_threshold,
             verbose=False,
+            device=self._device,
         )[0]
 
         detections: List[DetectedObject] = []

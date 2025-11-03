@@ -42,12 +42,17 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from autonomy.runtime.runtime_guard import register_shutdown_callback
+
 
 LOGGER = logging.getLogger("camera_autopilot")
 
-SAFE_PROBE_MODES: Sequence[Tuple[str, int, int, int]] = (
+SAFE_MJPG_MODES: Sequence[Tuple[str, int, int, int]] = (
     ("MJPG", 640, 480, 30),
     ("MJPG", 320, 240, 15),
+)
+
+SAFE_YUYV_MODES: Sequence[Tuple[str, int, int, int]] = (
     ("YUYV", 640, 480, 30),
     ("YUYV", 320, 240, 15),
 )
@@ -260,6 +265,7 @@ class _CameraAutopilotCore:
         nodes = node_overrides or _normalize_nodes(preferred_nodes)
         self.preferred_nodes = nodes
         self.labels = _query_device_labels()
+        self._plan_cache: Dict[str, List[CameraMode]] = {}
         _ensure_video_group(self.logger)
 
     @staticmethod
@@ -300,28 +306,45 @@ class _CameraAutopilotCore:
         for node in nodes:
             if node not in ordered:
                 ordered.append(node)
-        selection = self._sweep(ordered)
-        label = self.labels.get(selection.node)
-        if label:
-            selection = dataclasses.replace(selection, label=label)
-        self.logger.info(
-            "Camera recovery: %s (%s) after %s",
-            selection.node,
-            selection.mode.descriptor(),
-            reason,
-        )
-        return selection
+
+        for node in ordered:
+            plan = self._plan_for_node(node)
+            if not plan:
+                continue
+            if last and node == last.node:
+                modes = self._modes_after(plan, last.mode)
+            else:
+                modes = plan
+            for mode in modes:
+                result = self._probe(node, mode)
+                if result.success:
+                    selection = CameraSelection(node=node, mode=mode, init_ms=result.init_ms)
+                    label = self.labels.get(selection.node)
+                    if label:
+                        selection = dataclasses.replace(selection, label=label)
+                    self.logger.info(
+                        "Camera recovery: %s (%s) after %s",
+                        selection.node,
+                        selection.mode.descriptor(),
+                        reason,
+                    )
+                    return selection
+
+        raise RuntimeError(ERROR_MESSAGE)
+
+    def _plan_for_node(self, node: str) -> List[CameraMode]:
+        plan = self._plan_cache.get(node)
+        if plan is None:
+            plan = self._build_probe_plan(node)
+            self._plan_cache[node] = plan
+        return plan
 
     def _sweep(self, nodes: Sequence[str]) -> CameraSelection:
-        plan_cache: Dict[str, List[CameraMode]] = {}
         for sweep in range(2):
             for node in nodes:
-                plan = plan_cache.get(node)
-                if plan is None:
-                    plan = self._build_probe_plan(node)
-                    if not plan:
-                        continue
-                    plan_cache[node] = plan
+                plan = self._plan_for_node(node)
+                if not plan:
+                    continue
                 for mode in plan:
                     result = self._probe(node, mode)
                     if result.success:
@@ -342,7 +365,7 @@ class _CameraAutopilotCore:
         if self.preferred_mode:
             push(self.preferred_mode)
 
-        for spec in SAFE_PROBE_MODES:
+        for spec in SAFE_MJPG_MODES:
             push(CameraMode(*spec))
 
         extra_modes = _list_modes_v4l2(node)
@@ -350,10 +373,22 @@ class _CameraAutopilotCore:
         for mode in mjpg_extras:
             push(mode)
         for mode in extra_modes:
-            if mode.fourcc.upper() == "MJPG":
+            if mode.fourcc.upper() in {"MJPG", "YUYV"}:
                 continue
             push(mode)
+        for spec in SAFE_YUYV_MODES:
+            push(CameraMode(*spec))
         return plan
+
+    @staticmethod
+    def _modes_after(plan: Sequence[CameraMode], current: CameraMode) -> List[CameraMode]:
+        try:
+            index = plan.index(current)
+        except ValueError:
+            index = -1
+        if index + 1 >= len(plan):
+            return []
+        return list(plan[index + 1 :])
 
     def _probe(self, node: str, mode: CameraMode) -> _ProbeResult:
         start = time.perf_counter()
@@ -413,6 +448,8 @@ class CameraHandle:
         self._cap: Optional[cv2.VideoCapture] = None
         self._stall_recoveries = 0
         self._fatal_error: Optional[str] = None
+        self._stopped = False
+        self._last_stats_log = 0.0
 
     @property
     def selection(self) -> CameraSelection:
@@ -422,10 +459,14 @@ class CameraHandle:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
+        self._stopped = False
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
         self._stop_event.set()
         with self._cap_lock:
             if self._cap is not None:
@@ -517,6 +558,16 @@ class CameraHandle:
                 if ok and frame is not None and frame.size > 0:
                     stall_timer = now
                     self._update_frame(frame, now)
+                    if now - self._last_stats_log >= 5.0:
+                        stats = self.stats()
+                        self._logger.info(
+                            "Camera %s (%s) fps=%.2f recoveries=%s",
+                            stats.get("device"),
+                            stats.get("mode"),
+                            stats.get("fps") or 0.0,
+                            stats.get("stall_recoveries"),
+                        )
+                        self._last_stats_log = now
                     continue
                 time.sleep(0.01)
                 if now - stall_timer > self._stall_timeout:
@@ -527,24 +578,23 @@ class CameraHandle:
                     )
                     self._release_capture(capture)
                     capture = self._open_capture(selection)
-                    if capture is None:
-                        self._stall_recoveries += 1
-                        try:
-                            selection = self._autopilot.recover(selection, "stall")
-                            self._selection = selection
-                            capture = None
-                            stall_timer = time.time()
-                        except RuntimeError as exc:
-                            self._fatal_error = str(exc)
-                            self._logger.error("%s", exc)
-                            return
-                    else:
+                    if capture is not None:
                         self._logger.info(
                             "Recovered camera %s with same mode",
                             selection.node,
                         )
                         stall_timer = time.time()
                         continue
+                    self._stall_recoveries += 1
+                    try:
+                        selection = self._autopilot.recover(selection, "stall")
+                        self._selection = selection
+                        capture = None
+                        stall_timer = time.time()
+                    except RuntimeError as exc:
+                        self._fatal_error = str(exc)
+                        self._logger.error("%s", exc)
+                        return
         finally:
             if capture is not None:
                 self._release_capture(capture)
@@ -607,7 +657,9 @@ def open(
         logger=logger,
     )
     selection = autopilot.initial_selection()
-    return CameraHandle(autopilot=autopilot, selection=selection)
+    handle = CameraHandle(autopilot=autopilot, selection=selection)
+    register_shutdown_callback(handle.stop)
+    return handle
 
 
 def _preview(duration: float = 5.0) -> int:

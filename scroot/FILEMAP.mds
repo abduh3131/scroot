@@ -48,10 +48,10 @@ Central orchestrator that binds sensors, perception, navigation, advisor, and co
 - Persisting telemetry JSON and optional visualization overlays.
 
 ### `camera_autopilot.py`
-Self-contained camera discovery and recovery module. It enumerates `/dev/video*`, probes MJPEG/YUYV modes, chooses the first configuration that yields real frames, and restarts or switches devices automatically when the capture stalls. Exposes a `CameraHandle` with `start()`, `frames()`, `get_frame()`, `stats()`, and `stop()`.
+Self-contained camera discovery and recovery module. It enumerates `/dev/video*`, probes MJPEG modes in priority order (`/dev/video0` 640×480@30 → 320×240@15 → `/dev/video1` ...) before exploring other MJPEG sizes and finally YUYV fallbacks. It requires each mode to deliver ≥5 frames in one second, records rolling FPS every 5 s, and restarts or switches devices automatically when the capture stalls. Exposes a `CameraHandle` with `start()`, `frames()`, `get_frame()`, `stats()`, and `stop()`; the handle is registered with the runtime guard so shutdown happens cleanly.
 
 ### `autonomy/perception/object_detection.py`
-Wraps Ultralytics YOLO to produce `PerceptionSummary` objects containing detections, obstacle density metrics, and frame metadata. Configuration toggles allow adjusting model name, confidence, and IoU thresholds.
+Wraps Ultralytics YOLO to produce `PerceptionSummary` objects containing detections, obstacle density metrics, and frame metadata. Configuration toggles allow adjusting model name, confidence, and IoU thresholds. The module caches YOLO instances and respects the runtime guard device (CPU-only when CUDA is unavailable).
 
 ### `autonomy/ai/command_interface.py`
 Parses human directives such as “drive 2 m forward” or “turn around” into structured `HighLevelCommand` dataclasses. Supports live updates via a watched text file, default commands, and exports of the latest parsed state.
@@ -94,3 +94,5 @@ The single entry point for operators. Responsibilities:
 7. `AutonomyPilot` continuously exports JSON state for external monitoring and respects stop signals for safe shutdowns.
 
 With this map, new engineers can trace any actuator value back to its upstream source and adjust modules without breaking the surrounding system.
+### `autonomy/runtime/runtime_guard.py`
+Applies process-wide guardrails: checks CUDA capability, forces CPU-only execution when the installed Torch build cannot service the detected GPU, standardizes thread counts, registers atexit handlers for telemetry/camera cleanup, and exposes helper APIs for other modules to query the active device or log environment summaries.

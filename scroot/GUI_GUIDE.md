@@ -8,6 +8,7 @@ The Setup tab prepares the autonomy stack for your hardware and vehicle.
 
 ### Hardware Summary & Rescan
 - **Detected Hardware panel** &mdash; Shows the operating system, CPU/GPU details, and the compute tier that the bootstrapper selected. These values drive the recommended model intensity and dependency stack defaults.
+- The runtime guard also checks CUDA capability when the pilot launches. If the reported SM version is below the supported range (e.g., Quadro P520 with SM 6.1) or CUDA is unavailable (WSL2 without GPU pass-through), the guard logs `GPU unsupported...`, forces CPU-only execution, and keeps the GUI responsive.
 - **Rescan Hardware** &mdash; Runs the detection again. Use this after moving the SD card to a different Jetson, switching from WSL to native Ubuntu, or upgrading components so the GUI can recommend fresh profiles.
 
 ### Vehicle Envelope Panel
@@ -38,17 +39,17 @@ Validation runs when you press **Save Setup**; the app warns if any value is mis
 The Launch tab controls runtime options and lets you start/stop the autonomy loop. Drag the splitters between panes to resize the live feed, advisor console, and log window, and scroll the control column whenever you need more vertical room.
 
 ### Camera Source
-- **Camera Source** entry accepts either a numeric index (`0`, `1`, ...) or a video file/RTSP URL. Leave the default (`0`) to let the Camera Autopilot try `/dev/video*` sequentially and settle on the first mode that streams real frames.
+- **Camera Source** entry accepts either a numeric index (`0`, `1`, ...), `auto`, or a video file/RTSP URL. Leaving it at `auto` lets the Camera Autopilot sweep `/dev/video0`..`/dev/video9` in priority order and lock onto the first MJPG mode that actually delivers frames.
 - **How to find the index**:
   - On Ubuntu/WSL: run `ls /dev/video*` and try the lowest number that appears when the camera is plugged in.
   - With `v4l2-ctl --list-devices` you can see descriptive names mapped to `/dev/videoX` nodes.
   - On Jetson, USB cameras usually start at `0`; CSI cameras exposed through `nvarguscamerasrc` often require the `0` index through the GStreamer pipeline already configured in the launcher.
-- **Auto-recovery**: If the feed freezes, the Camera Autopilot releases the device, reopens the last working mode, and falls back to other nodes automatically—no manual restart needed.
+- **Auto-recovery**: If the feed freezes for ~1.5 s, the Camera Autopilot releases the device, retries the working mode once, and then falls back to other formats/devices automatically. Rolling FPS and recovery counts are logged every 5 s in the launch log.
 
 ### Resolution & FPS
-- **Resolution** fields set capture width and height in pixels.
+- **Resolution** fields set the maximum capture width and height the Camera Autopilot is allowed to prefer. The autopilot still tests the safe MJPG modes (640×480@30, 320×240@15) first before considering larger MJPEG sizes the camera reports.
 - **FPS** sets the target frame rate for the capture loop.
-- **Recommended defaults**: start with `1280 x 720` at `30 FPS`. Drop to `960 x 540` or `848 x 480` at `20–24 FPS` on Jetson Nano/WSL VMs if the Advisor reports latency spikes. Higher-tier GPUs can push `1920 x 1080` at `30 FPS`.
+- **Recommended defaults**: leave the default `640 x 480 @ 30 FPS` for WSL laptops and Jetson Nano/Xavier NX—this keeps the Advisor responsive even without GPU acceleration. Increase only after confirming the launch log stays free of `timeout` or `stall` warnings.
 
 ### GPS Integration
 - **Use External GPS** enables a USB dongle for live geolocation. When checked, the Launch tab streams NMEA sentences in the background and feeds the Navigator with latitude/longitude data. If the app cannot geocode addresses (no network or `geopy` missing) you can still enter destinations as raw `latitude,longitude` pairs.
@@ -78,7 +79,7 @@ The Launch tab controls runtime options and lets you start/stop the autonomy loo
   - `playful` &mdash; Light-hearted phrasing while still reporting Advisor verdicts. Messages remain rate-limited to ≤1 every 2 s.
 
 ### Launch Controls
-- **Telemetry Log Folder** lets you browse to a directory that will receive a live CSV (`pilot_log_YYYYMMDD_HHMMSS.csv`) of every control tick with actuator outputs, advisor verdicts, lane confidence, and caps. Leave it blank to skip CSV export.
+- **Telemetry Log Folder** lets you browse to a directory that will receive a live CSV (`pilot_log_YYYYMMDD_HHMMSS.csv`) of every control tick with actuator outputs, advisor verdicts, lane confidence, and caps. The file now starts with a `meta,environment,...` row summarizing the detected platform, GPU fallback status, and camera mode before the tick rows stream in. Leave it blank to skip CSV export.
 - **Start Pilot** launches the autonomy stack using all settings from both tabs (camera, vehicle envelope, advisor config, etc.). The button disables itself while the system runs.
 - **Stop Pilot** sends a stop signal to the background thread. Always use this before closing the application to ensure logs flush cleanly.
 - **Launch Log** streams real-time telemetry, including actuator commands, Advisor verdicts (`ALLOW`, `AMEND`, `BLOCK`), reason tags (e.g., `ttc_low`, `lane_bias_right`), and narration lines.

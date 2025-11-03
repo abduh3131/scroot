@@ -5,6 +5,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
 ## Features
 
 - Camera Autopilot that auto-discovers `/dev/video*` nodes, locks onto a stable MJPEG mode, and self-heals if frames stall.
+- Runtime guard that inspects CUDA capability, forces CPU-only operation on unsupported GPUs/WSL hosts, and registers clean shutdown hooks.
 - Real-time object detection powered by Ultralytics YOLO models (default: `yolov8n.pt`).
 - Hybrid navigation that fuses obstacle density analysis with natural-language operator goals.
 - Layered arbitration stack (Pilot → Advisor → SafetyGate) that can ALLOW, AMEND, or BLOCK commands every control tick.
@@ -46,6 +47,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
    The application now bootstraps itself: it scans your hardware, detects whether you are running native Ubuntu, Ubuntu-on-WSL, or Jetson JetPack, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. The setup flow also prepares the Advisor backend you selected—if Torch/Transformers are not available it automatically pivots to the lightweight heuristic Advisor so you can still launch safely. If the host Python refuses system-wide installs (PEP 668 “externally managed environment”), the bootstrapper automatically provisions `.venv/` and re-runs the install inside that sandbox so the GUI still opens with a single command. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
 
 3. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. The live feed now renders lane boundaries, projected trajectory lines, throttle/brake gauges, actuator readouts, advisor verdicts, and any GPS sub-goal bias on top of the camera stream. Drag the pane dividers to resize the camera feed, advisor console, or log window, and scroll the control column when space is tight. Use the messaging panel to see what the advisor plans (ALLOW/AMEND/BLOCK) and send natural-language directives back. The launch controls expose the lightweight or VLM advisor profiles, GPS toggles/serial settings, Advisor mode (normal/strict), Safety Mindset toggle, Ambient cruising, Riding Companion persona, and a **Telemetry Log Folder** picker—choose a directory there to stream a live CSV of every control tick. When no GPU or Transformers packages are present the GUI nudges you toward the ultra-light advisor profile automatically so constrained laptops still get responsive safety guidance.
+   The CSV now opens with a meta row describing the detected platform, GPU fallback status, and the selected camera mode before per-tick telemetry begins.
 
 ### Automated environment detection
 
@@ -57,15 +59,19 @@ The one-line launcher (`python scooter_app.py`) always performs a fresh scan bef
 
 If the host changes (e.g., you move the SD card to a different Jetson or upgrade your workstation), the cached profile is refreshed automatically at startup.
 
+### Runtime guard & CPU fallback
+
+Each time the pilot boots it checks `torch.cuda.is_available()` and the reported SM capability. If the installed build cannot serve the detected GPU (e.g., Quadro P520 with SM 6.1 or WSL2 without CUDA), the guardrail sets `CUDA_VISIBLE_DEVICES=""`, pins Ultralytics/Transformers to CPU, limits thread counts, and logs `GPU unsupported (SM X.Y). Running CPU-only.` You can still request GPU explicitly with `--device gpu`, but the guard will fall back to CPU whenever the hardware or build cannot satisfy the request. The guard also registers a single atexit hook so the camera stream, telemetry writers, and OpenCV windows shut down without `select()` timeouts or double-free crashes after repeated launches.
+
 ### Automatic camera setup
 
 The GUI and CLI both rely on the new **Camera Autopilot** (`camera_autopilot.py`) so any USB webcam you attach “just works,” even when WSL2 or usbipd negotiates an unreliable default mode. At launch the autopilot:
 
 1. Enumerates `/dev/video0` through `/dev/video9`, warning if your user is not in the `video` group.
 2. Optionally reads friendly names from `v4l2-ctl --list-devices` when the tool is installed.
-3. Probes each node using a prioritized plan (MJPG 640×480@30, MJPG 320×240@15, then YUYV fallbacks) and any additional MJPEG sizes it discovers. Each mode must deliver at least 5 frames inside a one-second window before it is accepted.
+3. Probes each node using a strict priority plan: `/dev/video0` MJPG 640×480@30, `/dev/video0` MJPG 320×240@15, then the same for `/dev/video1`, followed by any other MJPEG sizes the camera advertises, and finally YUYV 640×480@30 and 320×240@15 as last resorts. Each mode must deliver at least 5 frames inside a one-second window before it is accepted.
 4. Starts a dedicated capture thread with a one-frame buffer, continuously updating the latest frame used by the pilot and GUI overlays.
-5. Monitors for stalls (no frames for ~1.5 s). When a stall occurs it releases the device, retries the working mode once, then automatically falls back to other modes/devices and logs each transition. If every attempt fails twice you receive a single error: `No webcam delivered frames. Try reattaching device (usbipd), or a MJPEG-capable camera.`
+5. Monitors for stalls (no frames for ~1.5 s). When a stall occurs it releases the device, retries the working mode once, then automatically falls back to other modes/devices and logs each transition. Rolling FPS and recovery counts are logged every 5 s so you can verify stability. If every attempt fails twice you receive a single error: `No webcam delivered frames. Try reattaching device (usbipd), or a MJPEG-capable camera.`
 
 This logic keeps the camera alive even when usbipd renegotiates after sleep, when `/dev/video0` exposes a “processed” stream that hangs, or when the negotiated FPS is unsupported. You can inspect the same behaviour from the terminal with:
 
@@ -102,12 +108,12 @@ If you prefer the CLI or need to run headless, you can still launch the pilot di
 
    On Jetson devices you may prefer the Jetson-specific OpenCV or PyTorch builds. Adjust the requirement accordingly if you already have hardware-accelerated packages installed.
 
-2. **Connect your camera** via USB. The Camera Autopilot will probe `/dev/video*` automatically; pass `--camera` if you want to pin a preferred node or RTSP stream.
+2. **Connect your camera** via USB. The Camera Autopilot will probe `/dev/video*` automatically; pass `--cam` if you want to pin a preferred node or RTSP stream.
 
 3. **Launch the pilot** using the unified launcher:
 
    ```bash
-   python autonomy_launcher.py --camera 0 --advisor-mode strict --safety-mindset on --ambient on
+   python autonomy_launcher.py --cam auto --device auto --advisor-mode strict --safety-mindset on --ambient on
    ```
 
    The launcher checks dependencies, starts the camera, runs perception and the arbitration stack, and prints actuator commands together with the advisor verdict and reasons:
@@ -124,8 +130,9 @@ The launcher accepts several runtime flags:
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--camera` | Camera index or video path | `0` |
-| `--width` / `--height` | Capture resolution | `1280x720` |
+| `--device` | Compute preference (`auto`, `cpu`, or `gpu`) | `auto` |
+| `--cam` | Preferred camera node or stream (`auto` probes everything) | `auto` |
+| `--cam-max-res` | Maximum capture resolution to prioritize during probing | `640x480` |
 | `--fps` | Target frame rate | `30` |
 | `--model` | YOLO model file | `yolov8n.pt` |
 | `--confidence` | Detection confidence threshold | `0.3` |

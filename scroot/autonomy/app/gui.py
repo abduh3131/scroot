@@ -9,7 +9,7 @@ import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 import cv2
 import numpy as np
@@ -43,6 +43,7 @@ class PilotRunner(threading.Thread):
         log_callback: Callable[[str], None],
         on_stop: Callable[[], None],
         tick_callback: Optional[Callable[[PilotTickData], None]] = None,
+        environment_callback: Optional[Callable[[Dict[str, str], Dict[str, Any]], None]] = None,
     ) -> None:
         super().__init__(daemon=True)
         self.config = config
@@ -51,6 +52,7 @@ class PilotRunner(threading.Thread):
         self._stop_event = threading.Event()
         self._pilot: Optional[AutonomyPilot] = None
         self._tick_callback = tick_callback
+        self._environment_callback = environment_callback
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -60,6 +62,13 @@ class PilotRunner(threading.Thread):
     def run(self) -> None:  # pragma: no cover - interacts with hardware
         try:
             self._pilot = AutonomyPilot(self.config, tick_callback=self._handle_tick)
+            if self._environment_callback and self._pilot:
+                try:
+                    summary = self._pilot.environment_summary
+                    stats = self._pilot.camera_stats
+                    self._environment_callback(summary, stats)
+                except Exception as exc:
+                    self.log_callback(f"[warn] Failed to emit environment summary: {exc}")
             start = time.time()
             for command in self._pilot.run():
                 if self._stop_event.is_set():
@@ -635,6 +644,18 @@ class ScooterApp(tk.Tk):
         widget.see(tk.END)
         widget.configure(state=tk.DISABLED)
 
+    def _handle_environment(self, summary: Dict[str, str], stats: Dict[str, Any]) -> None:
+        def update() -> None:
+            summary_text = ", ".join(f"{k}={v}" for k, v in sorted(summary.items()))
+            stats_text = ", ".join(f"{k}={v}" for k, v in sorted(stats.items())) if stats else ""
+            message = "Environment: " + summary_text
+            if stats_text:
+                message += f" | camera {stats_text}"
+            self._append_launch_log(message)
+            self._write_environment_row(summary, stats)
+
+        self.after(0, update)
+
 
     def _choose_log_directory(self) -> None:
         initial = self.log_directory_var.get().strip()
@@ -765,6 +786,18 @@ class ScooterApp(tk.Tk):
         except Exception as exc:
             self._append_launch_log(f"[warn] Failed to write telemetry CSV: {exc}")
             self._stop_csv_logging(silent=True)
+
+    def _write_environment_row(self, summary: Dict[str, str], stats: Dict[str, Any]) -> None:
+        if not self._csv_writer or not self._csv_headers:
+            return
+        summary_text = " | ".join(f"{k}={v}" for k, v in sorted(summary.items()))
+        stats_text = " | ".join(f"{k}={v}" for k, v in sorted(stats.items())) if stats else ""
+        row = ["meta", "environment", summary_text, stats_text]
+        if len(row) < len(self._csv_headers):
+            row.extend([""] * (len(self._csv_headers) - len(row)))
+        self._csv_writer.writerow(row)
+        if self._csv_file:
+            self._csv_file.flush()
     def _update_model_description(self) -> None:
         profile = MODEL_PROFILES[self.model_var.get()]
         text = (
@@ -873,7 +906,8 @@ class ScooterApp(tk.Tk):
         gps_port = self.gps_port_var.get().strip()
         gps_enabled = bool(self.gps_enabled_var.get() and gps_port)
 
-        self.app_state.camera_source = self.camera_var.get()
+        camera_source = self.camera_var.get().strip() or "auto"
+        self.app_state.camera_source = camera_source
         self.app_state.resolution_width = width
         self.app_state.resolution_height = height
         self.app_state.fps = fps
@@ -895,6 +929,7 @@ class ScooterApp(tk.Tk):
         self.app_state.gps_enabled = gps_enabled
         self.app_state.gps_port = gps_port
         self.app_state.gps_baudrate = gps_baud
+        self.app_state.device_preference = self.app_state.device_preference or "auto"
         self.state_manager.save_state(self.app_state)
 
         model_profile = MODEL_PROFILES[self.model_var.get()]
@@ -918,7 +953,7 @@ class ScooterApp(tk.Tk):
         safety_mindset.enabled = self.mindset_var.get() == "on"
 
         config = PilotConfig(
-            camera_source=self.camera_var.get(),
+            camera_source=camera_source,
             camera_width=width,
             camera_height=height,
             camera_fps=fps,
@@ -928,6 +963,7 @@ class ScooterApp(tk.Tk):
             advisor_backend=advisor_profile.backend,
             advisor_image_model=advisor_profile.advisor_image_model,
             advisor_language_model=advisor_profile.advisor_language_model,
+            device_preference=self.app_state.device_preference,
             advisor=advisor_settings,
             navigation_intent=navigation_intent,
             safety_mindset=safety_mindset,
@@ -961,6 +997,7 @@ class ScooterApp(tk.Tk):
             log_callback=self._append_launch_log,
             on_stop=on_stop,
             tick_callback=self._handle_pilot_tick,
+            environment_callback=self._handle_environment,
         )
         self.pilot_thread.start()
 

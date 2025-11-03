@@ -4,11 +4,12 @@ import json
 import logging
 import signal
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Dict, Iterator, Optional
 
 import cv2
 import numpy as np
@@ -31,6 +32,11 @@ from autonomy.perception.lane_detection import LaneDetector
 from autonomy.perception.object_detection import ObjectDetector, ObjectDetectorConfig
 from autonomy.planning.gps import GPSRoutePlanner
 from autonomy.planning.navigator import Navigator, NavigatorConfig
+from autonomy.runtime.runtime_guard import (
+    apply_runtime_guard,
+    register_shutdown_callback,
+    runtime_environment_summary,
+)
 from autonomy.sensors.gps import GPSConfig, GPSModule
 from autonomy.utils.data_structures import (
     ActuatorCommand,
@@ -54,11 +60,27 @@ from camera_autopilot import CameraMode as AutoCameraMode
 from camera_autopilot import open as open_camera_autopilot
 
 
+_DESTROY_WINDOWS_FLAG = threading.Event()
+
+
+def _destroy_windows_once() -> None:
+    if _DESTROY_WINDOWS_FLAG.is_set():
+        return
+    _DESTROY_WINDOWS_FLAG.set()
+    try:
+        cv2.destroyAllWindows()
+    except Exception:  # pragma: no cover - defensive cleanup
+        pass
+
+
+register_shutdown_callback(_destroy_windows_once)
+
+
 @dataclass
 class PilotConfig:
-    camera_source: int | str = 0
-    camera_width: int = 1280
-    camera_height: int = 720
+    camera_source: int | str | None = "auto"
+    camera_width: int = 640
+    camera_height: int = 480
     camera_fps: int = 30
     model_name: str = "yolov8n.pt"
     confidence_threshold: float = 0.3
@@ -70,6 +92,7 @@ class PilotConfig:
     advisor_image_model: str = "Salesforce/blip-image-captioning-base"
     advisor_language_model: str = "google/flan-t5-small"
     advisor_device: Optional[str] = None
+    device_preference: str = "auto"
     advisor_state_path: Optional[Path] = Path("logs/advisor_state.json")
     command_state_path: Optional[Path] = Path("logs/command_state.json")
     initial_command: Optional[str] = None
@@ -102,9 +125,15 @@ class AutonomyPilot:
     ) -> None:
         self.config = config or PilotConfig()
         self._tick_callback = tick_callback
+        self._runtime_device = apply_runtime_guard(self.config.device_preference)
+        self._environment_summary = runtime_environment_summary()
+        source = self.config.camera_source
         preferred_nodes: list[str | int] | None = None
-        if isinstance(self.config.camera_source, (str, int)):
-            preferred_nodes = [self.config.camera_source]
+        if isinstance(source, str):
+            if source and source.lower() != "auto":
+                preferred_nodes = [source]
+        elif source is not None:
+            preferred_nodes = [source]
         preferred_mode = AutoCameraMode(
             fourcc="MJPG",
             width=int(self.config.camera_width),
@@ -119,6 +148,10 @@ class AutonomyPilot:
         except RuntimeError as exc:
             logging.error("Camera bootstrap failed: %s", exc)
             raise
+        selection = self._camera.selection
+        self.config.camera_width = selection.mode.width
+        self.config.camera_height = selection.mode.height
+        self.config.camera_fps = selection.mode.fps
         self._vehicle = VehicleEnvelope(
             width_m=self.config.vehicle_width_m,
             length_m=self.config.vehicle_length_m,
@@ -142,11 +175,14 @@ class AutonomyPilot:
         self._controller = Controller(self._controller_config)
         self._advisor = None
         if self.config.advisor_enabled:
+            advisor_device = self.config.advisor_device or self._runtime_device
+            if self._runtime_device == "cpu":
+                advisor_device = "cpu"
             advisor_config = AdvisorConfig(
                 backend=self.config.advisor_backend,
                 image_model=self.config.advisor_image_model,
                 language_model=self.config.advisor_language_model,
-                device=self.config.advisor_device,
+                device=advisor_device,
             )
             try:
                 self._advisor = create_advisor(advisor_config)
@@ -186,6 +222,7 @@ class AutonomyPilot:
             enabled=self.config.advisor_enabled,
         )
         self._telemetry = TelemetryLogger(self.config.log_dir)
+        register_shutdown_callback(self._telemetry.finalize)
         self._companion = RidingCompanion(persona=self.config.companion_persona)
         self._gps_planner = GPSRoutePlanner()
         self._gps_module: Optional[GPSModule] = None
@@ -201,6 +238,9 @@ class AutonomyPilot:
                 logging.warning(
                     "GPS was enabled but no serial port was provided; disabling GPS integration."
                 )
+
+        self._startup_logged = False
+        self._shutdown_logged = False
 
     @property
     def latest_decision(self) -> Optional[NavigationDecision]:
@@ -230,6 +270,17 @@ class AutonomyPilot:
     def latest_companion(self) -> Optional[str]:
         return self._latest_companion
 
+    @property
+    def environment_summary(self) -> Dict[str, str]:
+        return dict(self._environment_summary)
+
+    @property
+    def camera_stats(self) -> Dict[str, object]:
+        try:
+            return dict(self._camera.stats())
+        except Exception:
+            return {}
+
     def run(self) -> Iterator[ActuatorCommand]:
         logging.info("Starting autonomous pilot loop")
         self._running = True
@@ -239,6 +290,23 @@ class AutonomyPilot:
             except RuntimeError as exc:
                 logging.warning("GPS module failed to start: %s", exc)
                 self._gps_module = None
+        if not self._startup_logged:
+            selection = self._camera.selection
+            summary = dict(self._environment_summary)
+            summary.update(
+                {
+                    "camera_device": selection.node,
+                    "camera_mode": selection.mode.descriptor(),
+                }
+            )
+            if selection.label:
+                summary["camera_label"] = selection.label
+            self._telemetry.record_environment(summary)
+            logging.info(
+                "Runtime environment: %s",
+                ", ".join(f"{key}={value}" for key, value in summary.items()),
+            )
+            self._startup_logged = True
         try:
             self._camera.start()
         except RuntimeError as exc:
@@ -381,6 +449,28 @@ class AutonomyPilot:
         self._running = False
         if self._gps_module:
             self._gps_module.stop()
+        if hasattr(self, "_camera") and self._camera:
+            self._camera.stop()
+        if not self._shutdown_logged:
+            stats = {}
+            try:
+                stats = self._camera.stats()
+            except Exception:
+                stats = {}
+            shutdown_info = {
+                "camera_device": stats.get("device", ""),
+                "camera_mode": stats.get("mode", ""),
+                "stall_recoveries": str(stats.get("stall_recoveries", 0)),
+                "fatal_error": stats.get("fatal_error", "") or "",
+            }
+            self._telemetry.record_shutdown(shutdown_info)
+            logging.info(
+                "Pilot shutdown: %s",
+                ", ".join(f"{k}={v}" for k, v in shutdown_info.items() if v),
+            )
+            self._telemetry.finalize()
+            self._shutdown_logged = True
+        _destroy_windows_once()
 
     def _export_state(
         self,
@@ -624,7 +714,7 @@ def graceful_shutdown(pilot: AutonomyPilot):
         pilot.stop()
         signal.signal(signal.SIGINT, original)
         signal.signal(signal.SIGTERM, original)
-        cv2.destroyAllWindows()
+        _destroy_windows_once()
 
 
 def run_pilot(config: PilotConfig) -> None:
@@ -659,9 +749,10 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
     import argparse
 
     parser = argparse.ArgumentParser(description="Autonomous scooter pilot")
-    parser.add_argument("--camera", default=0, help="Camera source index or path")
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--device", choices=["auto", "cpu", "gpu"], default="auto", help="Compute device preference")
+    parser.add_argument("--cam", default="auto", help="Preferred camera node (e.g., /dev/video0) or 'auto'")
+    parser.add_argument("--camera", dest="cam", help=argparse.SUPPRESS)
+    parser.add_argument("--cam-max-res", default="640x480", help="Maximum resolution to prioritize when probing cameras")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--model", default="yolov8n.pt")
     parser.add_argument("--confidence", type=float, default=0.3)
@@ -710,6 +801,17 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
 
     args = parser.parse_args(argv)
 
+    res_token = args.cam_max_res.lower().replace(" ", "")
+    try:
+        w_str, h_str = res_token.split("x")
+        cam_width = int(w_str)
+        cam_height = int(h_str)
+    except ValueError:
+        parser.error("--cam-max-res must be in WIDTHxHEIGHT format, e.g., 640x480")
+
+    if cam_width <= 0 or cam_height <= 0:
+        parser.error("--cam-max-res must specify positive dimensions")
+
     if args.vehicle_width <= 0 or args.vehicle_length <= 0 or args.vehicle_height <= 0:
         parser.error("Vehicle dimensions must be greater than zero.")
     if args.clearance_margin < 0:
@@ -739,9 +841,9 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
     safety_mindset.enabled = args.safety_mindset == "on"
 
     return PilotConfig(
-        camera_source=args.camera,
-        camera_width=args.width,
-        camera_height=args.height,
+        camera_source=args.cam,
+        camera_width=cam_width,
+        camera_height=cam_height,
         camera_fps=args.fps,
         model_name=args.model,
         confidence_threshold=args.confidence,
@@ -752,6 +854,7 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
         advisor_image_model=args.advisor_image_model,
         advisor_language_model=args.advisor_language_model,
         advisor_device=args.advisor_device,
+        device_preference=args.device,
         advisor_state_path=advisor_state_path,
         command_state_path=command_state_path,
         initial_command=args.command,

@@ -23,6 +23,13 @@ class TelemetryLogger:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.telemetry_path = self.log_dir / "telemetry.jsonl"
         self.incidents_path = self.log_dir / "incidents.jsonl"
+        self._finalized = False
+
+    def _append_json(self, payload: Dict[str, Any]) -> None:
+        if self._finalized:
+            return
+        with self.telemetry_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload) + "\n")
 
     def _serialize_command(self, command: ActuatorCommand) -> Dict[str, float]:
         return {"steer": command.steer, "throttle": command.throttle, "brake": command.brake}
@@ -75,8 +82,7 @@ class TelemetryLogger:
         if companion_message:
             payload["companion"] = companion_message
 
-        with self.telemetry_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload) + "\n")
+        self._append_json(payload)
 
         if review.verdict in {AdvisorVerdict.AMEND, AdvisorVerdict.BLOCK}:
             incident = {
@@ -88,3 +94,20 @@ class TelemetryLogger:
             }
             with self.incidents_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(incident) + "\n")
+
+    def record_environment(self, info: Dict[str, Any]) -> None:
+        payload = {"event": "environment", "data": info}
+        self._append_json(payload)
+
+    def record_shutdown(self, info: Dict[str, Any]) -> None:
+        payload = {"event": "shutdown", "data": info}
+        self._append_json(payload)
+
+    def finalize(self) -> None:
+        if self._finalized:
+            return
+        try:
+            with self.telemetry_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"event": "telemetry_closed"}) + "\n")
+        finally:
+            self._finalized = True

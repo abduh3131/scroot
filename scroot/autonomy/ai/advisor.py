@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - handled dynamically
     BlipProcessor = None  # type: ignore
     _HAVE_TRANSFORMERS = False
 
+from autonomy.runtime.runtime_guard import current_device
 from autonomy.utils.data_structures import (
     AdvisorDirective,
     HighLevelCommand,
@@ -72,7 +73,10 @@ class SituationalAdvisor(BaseAdvisor):
                 "Install 'torch' and 'transformers' or switch to the lightweight advisor."
             )
         self.config = config or AdvisorConfig()
-        self._device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        runtime_device = current_device()
+        self._device = self.config.device or runtime_device or (
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
 
         logging.info("Loading advisor VLM '%s'", self.config.image_model)
         self._vlm_processor = BlipProcessor.from_pretrained(self.config.image_model)
