@@ -1,6 +1,6 @@
 """Lightweight autonomous driving stack for scooters and small vehicles."""
 
-from .ai import AdvisorConfig, SituationalAdvisor
+from .ai import AdvisorConfig, SituationalAdvisor, create_advisor
 from .pilot import AutonomyPilot, PilotConfig, main, run_pilot
 
 __all__ = [
@@ -10,4 +10,5 @@ __all__ = [
     "PilotConfig",
     "main",
     "run_pilot",
+    "create_advisor",
 ]
