@@ -31,7 +31,13 @@ _SHUTDOWN_CALLBACKS: List[Callable[[], None]] = []
 _ATEEXIT_REGISTERED = False
 
 
+def _is_wsl() -> bool:
+    return "microsoft" in platform.release().lower() or bool(os.environ.get("WSL_DISTRO_NAME"))
+
+
 def _detect_cuda_capability() -> tuple[bool, Optional[str], Optional[str]]:
+    if _is_wsl():
+        return False, None, "wsl_forced_cpu"
     try:
         import torch  # type: ignore
 
@@ -114,7 +120,9 @@ def apply_runtime_guard(preferred_device: str = "auto") -> str:
                 torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "4")))
             except Exception:  # pragma: no cover - torch optional
                 pass
-            if sm:
+            if reason == "wsl_forced_cpu":
+                LOGGER.info("WSL environment detected; running CPU-only.")
+            elif sm:
                 LOGGER.info("GPU unsupported (SM %s). Running CPU-only.", sm)
             else:
                 LOGGER.info("GPU unavailable. Running CPU-only.")

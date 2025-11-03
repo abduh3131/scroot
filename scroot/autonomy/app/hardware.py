@@ -16,11 +16,6 @@ try:  # Optional dependency that we include in requirements
 except Exception:  # pragma: no cover - psutil import error handled downstream
     psutil = None  # type: ignore
 
-try:  # torch might not be installed during setup
-    import torch
-except Exception:  # pragma: no cover - torch import error handled downstream
-    torch = None  # type: ignore
-
 
 @dataclass(slots=True)
 class HardwareProfile:
@@ -66,7 +61,22 @@ def _read_cpu_model() -> str:
     return platform.processor() or "Unknown CPU"
 
 
+def _is_wsl_environment() -> bool:
+    release = platform.release().lower()
+    return "microsoft" in release or os.environ.get("WSL_DISTRO_NAME") is not None
+
+
 def _detect_gpu() -> tuple[bool, Optional[str]]:
+    if _is_wsl_environment():
+        # Torch CUDA checks are prone to double-free aborts on some WSL builds; treat as CPU.
+        return False, None
+    torch = None
+    try:  # torch might not be installed during setup
+        import importlib
+
+        torch = importlib.import_module("torch")
+    except Exception:  # pragma: no cover - torch import error handled downstream
+        torch = None
     if torch is not None and getattr(torch, "cuda", None):
         try:
             if torch.cuda.is_available():
