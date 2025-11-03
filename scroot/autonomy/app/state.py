@@ -39,6 +39,7 @@ class AppState:
     gps_enabled: bool
     gps_port: str
     gps_baudrate: int
+    log_directory: str
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -74,6 +75,7 @@ class AppState:
             gps_enabled=False,
             gps_port="",
             gps_baudrate=9600,
+            log_directory="logs",
         )
 
 
@@ -106,6 +108,7 @@ class AppStateManager:
         data.setdefault("gps_enabled", False)
         data.setdefault("gps_port", "")
         data.setdefault("gps_baudrate", 9600)
+        data.setdefault("log_directory", "logs")
         return AppState(**data)
 
     def save_hardware(self, profile: HardwareProfile) -> None:

@@ -35,7 +35,7 @@ Validation runs when you press **Save Setup**; the app warns if any value is mis
 
 ## 2. Launch Tab
 
-The Launch tab controls runtime options and lets you start/stop the autonomy loop.
+The Launch tab controls runtime options and lets you start/stop the autonomy loop. Drag the splitters between panes to resize the live feed, advisor console, and log window, and scroll the control column whenever you need more vertical room.
 
 ### Camera Source
 - **Camera Source** entry accepts either a numeric index (`0`, `1`, ...) or a video file/RTSP URL.
@@ -77,6 +77,7 @@ The Launch tab controls runtime options and lets you start/stop the autonomy loo
   - `playful` &mdash; Light-hearted phrasing while still reporting Advisor verdicts. Messages remain rate-limited to ≤1 every 2 s.
 
 ### Launch Controls
+- **Telemetry Log Folder** lets you browse to a directory that will receive a live CSV (`pilot_log_YYYYMMDD_HHMMSS.csv`) of every control tick with actuator outputs, advisor verdicts, lane confidence, and caps. Leave it blank to skip CSV export.
 - **Start Pilot** launches the autonomy stack using all settings from both tabs (camera, vehicle envelope, advisor config, etc.). The button disables itself while the system runs.
 - **Stop Pilot** sends a stop signal to the background thread. Always use this before closing the application to ensure logs flush cleanly.
 - **Launch Log** streams real-time telemetry, including actuator commands, Advisor verdicts (`ALLOW`, `AMEND`, `BLOCK`), reason tags (e.g., `ttc_low`, `lane_bias_right`), and narration lines.
@@ -85,7 +86,7 @@ The Launch tab controls runtime options and lets you start/stop the autonomy loo
 - **Live Feed panel** shows the current camera image with lane boundaries, projected trajectory lines (center and envelope edges), GPS route cues, and the Advisor verdict banner (green = ALLOW, amber = AMEND, red = BLOCK) with reason tags and latency.
 - **Throttle/Brake gauges** update each tick to mirror actuator outputs. Green bars rise with throttle, red bars rise with braking, and the steer readout helps correlate servo motion with what you see on screen.
 - **Gate tags & caps** appear inside the overlay text whenever the SafetyGate clamps throttle (`caps_speed`, `envelope_stop`, etc.) or when the Safety Mindset imposes a stricter limit.
-- **Advisor Messaging box** records every verdict change and directive in natural language. Use the entry field to send commands such as “drive 3 m forward”, “turn left”, or “stop” without leaving the GUI—the Command Interface parses them immediately.
+- **Advisor Messaging box** records every verdict change and directive in natural language. Use the entry field to send commands such as “drive 3 m forward”, “turn left”, or “stop” without leaving the GUI—the Command Interface parses them immediately. Drag the splitter above/below the panel to make space for long conversations; the text area scrolls automatically.
 
 ## 3. Best Practices & Troubleshooting
 

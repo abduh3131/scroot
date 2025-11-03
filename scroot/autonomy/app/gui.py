@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
 
 import cv2
@@ -113,6 +116,50 @@ class PilotRunner(threading.Thread):
                 self.log_callback(f"[warn] Unable to submit command: {exc}")
 
 
+class ScrollableFrame(ttk.Frame):
+    """Reusable scrollable frame with mouse wheel support."""
+
+    def __init__(self, master: tk.Misc, **frame_kwargs) -> None:
+        super().__init__(master)
+        self._canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        self._scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._scrollbar.set)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.content = ttk.Frame(self._canvas, **frame_kwargs)
+        self._window = self._canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        self.content.bind("<Configure>", self._on_frame_configure)
+        self._canvas.bind("<Configure>", self._on_canvas_configure)
+        self.content.bind("<Enter>", lambda _event: self._bind_mousewheel())
+        self.content.bind("<Leave>", lambda _event: self._unbind_mousewheel())
+
+    def _on_frame_configure(self, _event: tk.Event) -> None:
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        self._canvas.itemconfigure(self._window, width=event.width)
+
+    def _bind_mousewheel(self) -> None:
+        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self._canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self._canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self) -> None:
+        self._canvas.unbind_all("<MouseWheel>")
+        self._canvas.unbind_all("<Button-4>")
+        self._canvas.unbind_all("<Button-5>")
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        if event.delta:
+            self._canvas.yview_scroll(int(-event.delta / 120), "units")
+        elif getattr(event, "num", None) == 4:
+            self._canvas.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            self._canvas.yview_scroll(1, "units")
+
+
 class ScooterApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -146,6 +193,14 @@ class ScooterApp(tk.Tk):
         self._last_directive: str = ""
         self._last_companion: str = ""
 
+        initial_log_dir = self.app_state.log_directory or "logs"
+        self.log_directory_var = tk.StringVar(value=initial_log_dir)
+        self.app_state.log_directory = initial_log_dir
+        self._csv_file = None
+        self._csv_writer = None
+        self._current_log_path: Optional[Path] = None
+        self._csv_headers: Optional[list[str]] = None
+
         self._build_ui()
         self._render_hardware_summary()
         self._update_model_description()
@@ -154,6 +209,9 @@ class ScooterApp(tk.Tk):
 
     # ------------------------------------------------------------------
     # UI construction
+
+
+
     def _build_ui(self) -> None:
         style = ttk.Style(self)
         style.configure("Headline.TLabel", font=("Segoe UI", 16, "bold"))
@@ -162,10 +220,99 @@ class ScooterApp(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        self.setup_frame = ttk.Frame(self.notebook, padding=20)
-        self.run_frame = ttk.Frame(self.notebook, padding=20)
-        self.notebook.add(self.setup_frame, text="Setup")
-        self.notebook.add(self.run_frame, text="Launch")
+        self.setup_container = ScrollableFrame(self.notebook)
+        self.setup_frame = ttk.Frame(self.setup_container.content, padding=20)
+        self.setup_frame.grid(row=0, column=0, sticky="nsew")
+        self.setup_container.content.columnconfigure(0, weight=1)
+        self.setup_container.content.rowconfigure(0, weight=1)
+        self.notebook.add(self.setup_container, text="Setup")
+
+        self.run_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.run_tab, text="Launch")
+
+        self.run_paned = ttk.Panedwindow(self.run_tab, orient=tk.HORIZONTAL)
+        self.run_paned.pack(fill=tk.BOTH, expand=True)
+
+        self.run_controls_container = ScrollableFrame(self.run_paned)
+        self.run_frame = ttk.Frame(self.run_controls_container.content, padding=20)
+        self.run_frame.grid(row=0, column=0, sticky="nsew")
+        self.run_controls_container.content.columnconfigure(0, weight=1)
+        self.run_controls_container.content.rowconfigure(0, weight=1)
+        self.run_paned.add(self.run_controls_container, weight=2)
+
+        self.run_display_paned = ttk.Panedwindow(self.run_paned, orient=tk.VERTICAL)
+        self.run_paned.add(self.run_display_paned, weight=3)
+
+        self.video_frame = ttk.LabelFrame(self.run_display_paned, text="Live Camera & Advisor Overlay")
+        self.video_frame.columnconfigure(0, weight=1)
+        self.video_frame.rowconfigure(0, weight=1)
+        self.video_label = ttk.Label(
+            self.video_frame, text="Video feed will appear here", anchor="center", justify=tk.CENTER
+        )
+        self.video_label.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 0))
+
+        self.telemetry_frame = ttk.Frame(self.video_frame, padding=(8, 4))
+        self.telemetry_frame.grid(row=1, column=0, sticky="ew")
+        self.telemetry_frame.columnconfigure(1, weight=1)
+        self.telemetry_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(self.telemetry_frame, text="Throttle").grid(row=0, column=0, sticky="w")
+        self.throttle_bar = ttk.Progressbar(
+            self.telemetry_frame, orient=tk.HORIZONTAL, length=220, mode="determinate", maximum=100
+        )
+        self.throttle_bar.grid(row=0, column=1, sticky="ew", padx=(6, 12))
+
+        ttk.Label(self.telemetry_frame, text="Brake").grid(row=1, column=0, sticky="w")
+        self.brake_bar = ttk.Progressbar(
+            self.telemetry_frame, orient=tk.HORIZONTAL, length=220, mode="determinate", maximum=100
+        )
+        self.brake_bar.grid(row=1, column=1, sticky="ew", padx=(6, 12))
+
+        ttk.Label(self.telemetry_frame, text="Steer").grid(row=0, column=2, sticky="w")
+        self.steer_value = tk.StringVar(value="0.00")
+        ttk.Label(self.telemetry_frame, textvariable=self.steer_value, width=8).grid(row=0, column=3, sticky="w")
+
+        ttk.Label(self.telemetry_frame, text="Advisor Verdict").grid(row=1, column=2, sticky="w")
+        self.advisor_status = tk.StringVar(value="Idle")
+        ttk.Label(self.telemetry_frame, textvariable=self.advisor_status, width=24).grid(row=1, column=3, sticky="w")
+
+        self.run_display_paned.add(self.video_frame, weight=3)
+
+        self.message_log_paned = ttk.Panedwindow(self.run_display_paned, orient=tk.VERTICAL)
+        self.run_display_paned.add(self.message_log_paned, weight=2)
+
+        self.message_frame = ttk.LabelFrame(self.message_log_paned, text="Advisor Messaging", padding=(8, 6))
+        self.message_frame.columnconfigure(0, weight=1)
+        self.message_frame.columnconfigure(1, weight=1)
+        self.message_frame.rowconfigure(0, weight=1)
+        self.message_log_paned.add(self.message_frame, weight=2)
+
+        self.message_text = tk.Text(self.message_frame, height=6, state=tk.DISABLED, wrap=tk.WORD)
+        self.message_text.grid(row=0, column=0, columnspan=3, sticky="nsew")
+        self.message_scroll = ttk.Scrollbar(self.message_frame, orient=tk.VERTICAL, command=self.message_text.yview)
+        self.message_text.configure(yscrollcommand=self.message_scroll.set)
+        self.message_scroll.grid(row=0, column=3, sticky="ns")
+
+        self.command_var = tk.StringVar()
+        self.command_entry = ttk.Entry(self.message_frame, textvariable=self.command_var)
+        self.command_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.command_entry.bind("<Return>", lambda _event: self._send_command())
+        self.send_button = ttk.Button(self.message_frame, text="Send", command=self._send_command)
+        self.send_button.grid(row=1, column=2, sticky="e", padx=(6, 0), pady=(6, 0))
+
+        self.log_frame = ttk.LabelFrame(self.message_log_paned, text="Launch Log", padding=(8, 6))
+        self.log_frame.columnconfigure(0, weight=1)
+        self.log_frame.rowconfigure(0, weight=1)
+        self.message_log_paned.add(self.log_frame, weight=1)
+
+        self.launch_log = tk.Text(self.log_frame, height=10, state=tk.DISABLED)
+        self.launch_log.grid(row=0, column=0, sticky="nsew")
+        self.launch_log_scroll = ttk.Scrollbar(self.log_frame, orient=tk.VERTICAL, command=self.launch_log.yview)
+        self.launch_log.configure(yscrollcommand=self.launch_log_scroll.set)
+        self.launch_log_scroll.grid(row=0, column=1, sticky="ns")
+
+        self.run_frame.columnconfigure(1, weight=1)
+        self.run_frame.columnconfigure(2, weight=1)
 
         # Setup Tab -----------------------------------------------------
         self.hardware_label = ttk.Label(self.setup_frame, style="Body.TLabel", justify=tk.LEFT)
@@ -334,64 +481,23 @@ class ScooterApp(tk.Tk):
             state="readonly",
         ).grid(row=12, column=1, sticky="w")
 
+        ttk.Label(self.run_frame, text="Telemetry Log Folder", style="Body.TLabel").grid(
+            row=13, column=0, sticky="w", pady=(12, 0)
+        )
+        ttk.Entry(self.run_frame, textvariable=self.log_directory_var, width=28).grid(
+            row=13, column=1, columnspan=2, sticky="ew", pady=(12, 0)
+        )
+        ttk.Button(self.run_frame, text="Browse...", command=self._choose_log_directory).grid(
+            row=13, column=3, sticky="w", pady=(12, 0)
+        )
+
         self.start_button = ttk.Button(self.run_frame, text="Start Pilot", command=self._start_pilot)
-        self.start_button.grid(row=13, column=0, pady=(24, 0), sticky="w")
+        self.start_button.grid(row=14, column=0, pady=(24, 0), sticky="w")
 
         self.stop_button = ttk.Button(
             self.run_frame, text="Stop Pilot", command=self._stop_pilot, state=tk.DISABLED
         )
-        self.stop_button.grid(row=13, column=1, pady=(24, 0), sticky="w")
-
-        self.video_frame = ttk.LabelFrame(self.run_frame, text="Live Camera & Advisor Overlay")
-        self.video_frame.grid(row=14, column=0, columnspan=4, pady=(16, 0), sticky="nsew")
-        self.video_label = ttk.Label(self.video_frame, text="Video feed will appear here", anchor="center")
-        self.video_label.pack(fill=tk.BOTH, expand=True)
-
-        telemetry_frame = ttk.Frame(self.run_frame)
-        telemetry_frame.grid(row=15, column=0, columnspan=4, sticky="ew", pady=(12, 0))
-        telemetry_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(telemetry_frame, text="Throttle").grid(row=0, column=0, sticky="w")
-        self.throttle_bar = ttk.Progressbar(
-            telemetry_frame, orient=tk.HORIZONTAL, length=220, mode="determinate", maximum=100
-        )
-        self.throttle_bar.grid(row=0, column=1, sticky="ew", padx=(6, 12))
-
-        ttk.Label(telemetry_frame, text="Brake").grid(row=1, column=0, sticky="w")
-        self.brake_bar = ttk.Progressbar(
-            telemetry_frame, orient=tk.HORIZONTAL, length=220, mode="determinate", maximum=100
-        )
-        self.brake_bar.grid(row=1, column=1, sticky="ew", padx=(6, 12))
-
-        ttk.Label(telemetry_frame, text="Steer").grid(row=0, column=2, sticky="w")
-        self.steer_value = tk.StringVar(value="0.00")
-        ttk.Label(telemetry_frame, textvariable=self.steer_value, width=8).grid(row=0, column=3, sticky="w")
-
-        ttk.Label(telemetry_frame, text="Advisor Verdict").grid(row=1, column=2, sticky="w")
-        self.advisor_status = tk.StringVar(value="Idle")
-        ttk.Label(telemetry_frame, textvariable=self.advisor_status, width=18).grid(row=1, column=3, sticky="w")
-
-        self.message_frame = ttk.LabelFrame(self.run_frame, text="Advisor Messaging")
-        self.message_frame.grid(row=14, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
-        self.message_frame.rowconfigure(0, weight=1)
-        self.message_frame.columnconfigure(0, weight=1)
-        self.message_text = tk.Text(self.message_frame, height=6, state=tk.DISABLED, wrap=tk.WORD)
-        self.message_text.grid(row=0, column=0, columnspan=3, sticky="nsew")
-        self.command_var = tk.StringVar()
-        self.command_entry = ttk.Entry(self.message_frame, textvariable=self.command_var)
-        self.command_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.command_entry.bind("<Return>", lambda _event: self._send_command())
-        self.send_button = ttk.Button(self.message_frame, text="Send", command=self._send_command)
-        self.send_button.grid(row=1, column=2, sticky="e", padx=(6, 0), pady=(6, 0))
-
-        self.launch_log = tk.Text(self.run_frame, height=10, width=100, state=tk.DISABLED)
-        self.launch_log.grid(row=15, column=0, columnspan=4, pady=(16, 0), sticky="nsew")
-
-        self.run_frame.rowconfigure(12, weight=3)
-        self.run_frame.rowconfigure(14, weight=1)
-        self.run_frame.rowconfigure(15, weight=1)
-        self.run_frame.columnconfigure(3, weight=1)
-
+        self.stop_button.grid(row=14, column=1, pady=(24, 0), sticky="w")
     # ------------------------------------------------------------------
     def _build_vehicle_section(self) -> None:
         self.vehicle_description_var = tk.StringVar(value=self.app_state.vehicle_description)
@@ -529,6 +635,136 @@ class ScooterApp(tk.Tk):
         widget.see(tk.END)
         widget.configure(state=tk.DISABLED)
 
+
+    def _choose_log_directory(self) -> None:
+        initial = self.log_directory_var.get().strip()
+        try:
+            initial_path = Path(initial).expanduser() if initial else Path.cwd()
+        except Exception:
+            initial_path = Path.cwd()
+        directory = filedialog.askdirectory(parent=self, initialdir=str(initial_path))
+        if directory:
+            self.log_directory_var.set(directory)
+            self.app_state.log_directory = directory
+            self.state_manager.save_state(self.app_state)
+            self._append_launch_log(f"Log directory set to {directory}")
+
+    def _start_csv_logging(self) -> None:
+        self._stop_csv_logging(silent=True)
+        directory = self.log_directory_var.get().strip()
+        if not directory:
+            self._append_launch_log("Telemetry CSV logging disabled (no directory selected).")
+            return
+        try:
+            target_dir = Path(directory).expanduser()
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self._append_launch_log(f"[warn] Could not prepare log directory: {exc}")
+            return
+        filename = target_dir / f"pilot_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        try:
+            self._csv_file = filename.open("w", newline="", encoding="utf-8")
+        except OSError as exc:
+            self._append_launch_log(f"[warn] Unable to open log file {filename}: {exc}")
+            self._csv_file = None
+            return
+        self._csv_writer = csv.writer(self._csv_file)
+        self._csv_headers = [
+            "timestamp_s",
+            "steer",
+            "throttle",
+            "brake",
+            "advisor_verdict",
+            "advisor_reasons",
+            "advisor_latency_ms",
+            "amended_command",
+            "directive",
+            "goal_context",
+            "gate_tags",
+            "caps_active",
+            "caps_source",
+            "caps_max_speed_mps",
+            "caps_min_clearance_m",
+            "lane_type",
+            "lane_confidence",
+            "desired_speed_mps",
+            "hazard_level",
+            "companion_message",
+        ]
+        self._csv_writer.writerow(self._csv_headers)
+        self._csv_file.flush()
+        self._current_log_path = filename
+        self._append_launch_log(f"Writing telemetry to {filename}")
+
+    def _stop_csv_logging(self, silent: bool = False) -> None:
+        if self._csv_file:
+            path = self._current_log_path
+            try:
+                self._csv_file.flush()
+                self._csv_file.close()
+            except Exception as exc:
+                if not silent:
+                    self._append_launch_log(f"[warn] Failed to close log file: {exc}")
+            else:
+                if not silent and path:
+                    self._append_launch_log(f"Telemetry CSV saved to {path}")
+        self._csv_file = None
+        self._csv_writer = None
+        self._current_log_path = None
+        self._csv_headers = None
+
+    def _write_csv_row(self, payload: PilotTickData) -> None:
+        if not self._csv_writer:
+            return
+        try:
+            review = payload.review
+            verdict = review.verdict.value if review else ""
+            reasons = ",".join(review.reason_tags) if review and review.reason_tags else ""
+            latency = f"{review.latency_ms:.2f}" if review else ""
+            amended = ""
+            if review and review.amended_command:
+                amended_cmd = review.amended_command
+                amended = f"{amended_cmd.steer:+.2f}/{amended_cmd.throttle:.2f}/{amended_cmd.brake:.2f}"
+            directive = payload.decision.directive
+            goal = payload.decision.goal_context
+            gate_tags = "|".join(payload.gate_tags) if payload.gate_tags else ""
+            caps = getattr(payload, "caps", None)
+            caps_active = caps.active if caps else False
+            caps_source = caps.source if caps else ""
+            caps_max_speed = f"{caps.max_speed_mps:.2f}" if caps else ""
+            caps_min_clearance = f"{caps.min_clearance_m:.2f}" if caps else ""
+            context = getattr(payload, "context", None)
+            lane_type = context.lane_type.value if context else ""
+            lane_conf = f"{context.confidence:.3f}" if context else ""
+            desired_speed = f"{payload.decision.desired_speed:.2f}"
+            hazard = f"{payload.decision.hazard_level:.2f}"
+            row = [
+                f"{payload.timestamp:.3f}",
+                f"{payload.command.steer:.3f}",
+                f"{payload.command.throttle:.3f}",
+                f"{payload.command.brake:.3f}",
+                verdict,
+                reasons,
+                latency,
+                amended,
+                directive,
+                goal,
+                gate_tags,
+                str(caps_active),
+                caps_source,
+                caps_max_speed,
+                caps_min_clearance,
+                lane_type,
+                lane_conf,
+                desired_speed,
+                hazard,
+                payload.companion or "",
+            ]
+            self._csv_writer.writerow(row)
+            self._csv_file.flush()
+        except Exception as exc:
+            self._append_launch_log(f"[warn] Failed to write telemetry CSV: {exc}")
+            self._stop_csv_logging(silent=True)
     def _update_model_description(self) -> None:
         profile = MODEL_PROFILES[self.model_var.get()]
         text = (
@@ -573,6 +809,7 @@ class ScooterApp(tk.Tk):
         self.app_state.vehicle_clearance_margin_m = vehicle_settings["margin"]
         self.app_state.calibration_reference_distance_m = vehicle_settings["calibration_distance"]
         self.app_state.calibration_reference_pixels = vehicle_settings["calibration_pixels"]
+        self.app_state.log_directory = self.log_directory_var.get().strip()
         self.state_manager.save_state(self.app_state)
         self._append_setup_log("Setup saved.")
         messagebox.showinfo("Setup", "Configuration saved successfully.")
@@ -654,6 +891,7 @@ class ScooterApp(tk.Tk):
         self.app_state.vehicle_clearance_margin_m = vehicle_settings["margin"]
         self.app_state.calibration_reference_distance_m = vehicle_settings["calibration_distance"]
         self.app_state.calibration_reference_pixels = vehicle_settings["calibration_pixels"]
+        self.app_state.log_directory = self.log_directory_var.get().strip()
         self.app_state.gps_enabled = gps_enabled
         self.app_state.gps_port = gps_port
         self.app_state.gps_baudrate = gps_baud
@@ -708,12 +946,14 @@ class ScooterApp(tk.Tk):
         )
 
         self._append_launch_log("Launching autonomy pilot...")
+        self._start_csv_logging()
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
 
         def on_stop() -> None:
             self.after(0, lambda: self.start_button.configure(state=tk.NORMAL))
             self.after(0, lambda: self.stop_button.configure(state=tk.DISABLED))
+            self.after(0, self._stop_csv_logging)
             self._append_launch_log("Pilot stopped.")
 
         self.pilot_thread = PilotRunner(
@@ -729,6 +969,7 @@ class ScooterApp(tk.Tk):
             return
         self._append_launch_log("Stopping pilot...")
         self.pilot_thread.stop()
+        self._stop_csv_logging(silent=True)
         self.pilot_thread = None
 
     def _handle_pilot_tick(self, payload: PilotTickData) -> None:
@@ -780,6 +1021,7 @@ class ScooterApp(tk.Tk):
             )
             self.video_label.configure(compound=tk.TOP)
             self.video_label.configure(text="" if self._video_photo else actuator_summary)
+            self._write_csv_row(payload)
 
         self.after(0, update)
 

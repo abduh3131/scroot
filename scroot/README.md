@@ -13,12 +13,13 @@ This package contains a self-contained autonomous driving stack tailored for lig
 - Riding companion narration that explains each Advisor decision without blocking the control loop.
 - Optional multimodal VLM companion (BLIP + FLAN-T5) for descriptive captions and free-form directives.
 - Lightweight heuristic advisor profile for CPU-only laptops plus optional VLM tiers when you have GPU headroom.
-- Live launch dashboard with camera feed, projected path overlays, throttle/brake gauges, actuator readouts, and advisor chat.
+- Live launch dashboard with scrollable controls, adjustable camera/advisor panes, projected path overlays, throttle/brake gauges, actuator readouts, and advisor chat.
 - Lane-detection overlays that keep the scooter centered and highlight predicted trajectories in real time.
 - GPS route planning via USB dongles so you can enter street addresses and monitor bearing/distance from the GUI.
 - Offline-friendly GPS routing accepts raw `lat,lon` coordinates when geocoding services or `geopy` are unavailable.
 - Command parser that understands phrases such as "drive to the plaza", "drive 2 m forward", or "turn right" and feeds them into the navigator.
 - Structured telemetry exports (`logs/command_state.json`, `logs/advisor_state.json`, `logs/telemetry.jsonl`, `logs/incidents.jsonl`) for auditing and supervision.
+- Configurable CSV telemetry export that streams control ticks to a user-selected folder for rapid debugging and analysis.
 - Modular design that allows future sensors (ultrasonic, LiDAR, depth) to feed into the navigator without architectural changes.
 
 ## Quick Start
@@ -44,7 +45,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
 
    The application now bootstraps itself: it scans your hardware, detects whether you are running native Ubuntu, Ubuntu-on-WSL, or Jetson JetPack, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. The setup flow also prepares the Advisor backend you selected—if Torch/Transformers are not available it automatically pivots to the lightweight heuristic Advisor so you can still launch safely. If the host Python refuses system-wide installs (PEP 668 “externally managed environment”), the bootstrapper automatically provisions `.venv/` and re-runs the install inside that sandbox so the GUI still opens with a single command. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
 
-3. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. The live feed now renders lane boundaries, projected trajectory lines, throttle/brake gauges, actuator readouts, advisor verdicts, and any GPS sub-goal bias on top of the camera stream. Use the messaging panel to see what the advisor plans (ALLOW/AMEND/BLOCK) and send natural-language directives back. The launch controls expose the lightweight or VLM advisor profiles, GPS toggles/serial settings, Advisor mode (normal/strict), Safety Mindset toggle, Ambient cruising, and Riding Companion persona—tweak them to match the environment before launching. When no GPU or Transformers packages are present the GUI nudges you toward the ultra-light advisor profile automatically so constrained laptops still get responsive safety guidance.
+3. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. The live feed now renders lane boundaries, projected trajectory lines, throttle/brake gauges, actuator readouts, advisor verdicts, and any GPS sub-goal bias on top of the camera stream. Drag the pane dividers to resize the camera feed, advisor console, or log window, and scroll the control column when space is tight. Use the messaging panel to see what the advisor plans (ALLOW/AMEND/BLOCK) and send natural-language directives back. The launch controls expose the lightweight or VLM advisor profiles, GPS toggles/serial settings, Advisor mode (normal/strict), Safety Mindset toggle, Ambient cruising, Riding Companion persona, and a **Telemetry Log Folder** picker—choose a directory there to stream a live CSV of every control tick. When no GPU or Transformers packages are present the GUI nudges you toward the ultra-light advisor profile automatically so constrained laptops still get responsive safety guidance.
 
 ### Automated environment detection
 
@@ -184,6 +185,7 @@ Ambient mode gates motion when no explicit goal is set—movement occurs only wh
 ### Telemetry & Incident Logging
 
 - `logs/telemetry.jsonl` records every tick with advisor decision, reason tags, latency, proposed vs final command, caps, lane context, and navigation sub-goal state.
+- GUI-selected CSV logs (e.g., `pilot_log_*.csv`) mirror each tick with actuator commands, advisor verdicts, lane context, caps, and companion narration for spreadsheet analysis.
 - `logs/incidents.jsonl` captures each AMEND/BLOCK event with a reference to 5 s pre/post clips (populate the clip fields if you archive video). Use these logs to audit fail-stop coverage and advisor timing.
 - Vehicle envelope metadata (lane width estimate, left/right clearance, required clearance) is emitted with each tick so you can audit why the Advisor held, amended, or released control.
 
