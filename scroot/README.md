@@ -4,18 +4,102 @@ This package contains a self-contained autonomous driving stack tailored for lig
 
 ## Features
 
-- Camera ingestion pipeline compatible with any USB camera supported by OpenCV.
+- Camera Autopilot that auto-discovers `/dev/video*` nodes, locks onto a stable MJPEG mode, and self-heals if frames stall.
+- Runtime guard that inspects CUDA capability, forces CPU-only operation on unsupported GPUs/WSL hosts, and registers clean shutdown hooks.
 - Real-time object detection powered by Ultralytics YOLO models (default: `yolov8n.pt`).
 - Hybrid navigation that fuses obstacle density analysis with natural-language operator goals.
-- Safety-aware control layer that outputs normalized actuator commands, brakes for hazards, and honors enforced stops.
-- Optional multimodal advisor (BLIP + FLAN-T5) that captions the scene and issues traffic-law-compliant directives ("use the bike lane", "yield", "slow down").
+- Layered arbitration stack (Pilot → Advisor → SafetyGate) that can ALLOW, AMEND, or BLOCK commands every control tick.
+- Optional safety mindset profiles that cap maximum speed / clearance and adapt to lane uncertainty or sensor degradation.
+- Vehicle envelope modeling with user-defined dimensions and camera calibration to keep commands within real clearance limits.
+- Riding companion narration that explains each Advisor decision without blocking the control loop.
+- Optional multimodal VLM companion (BLIP + FLAN-T5) for descriptive captions and free-form directives.
+- Lightweight heuristic advisor profile for CPU-only laptops plus optional VLM tiers when you have GPU headroom.
+- Live launch dashboard with scrollable controls, adjustable camera/advisor panes, projected path overlays, throttle/brake gauges, actuator readouts, and advisor chat.
+- Lane-detection overlays that keep the scooter centered and highlight predicted trajectories in real time.
+- GPS route planning via USB dongles so you can enter street addresses and monitor bearing/distance from the GUI.
+- Offline-friendly GPS routing accepts raw `lat,lon` coordinates when geocoding services or `geopy` are unavailable.
 - Command parser that understands phrases such as "drive to the plaza", "drive 2 m forward", or "turn right" and feeds them into the navigator.
-- Structured state export (`logs/command_state.json`, `logs/advisor_state.json`) for telemetry, remote supervision, or UI dashboards.
+- Structured telemetry exports (`logs/command_state.json`, `logs/advisor_state.json`, `logs/telemetry.jsonl`, `logs/incidents.jsonl`) for auditing and supervision.
+- Configurable CSV telemetry export that streams control ticks to a user-selected folder for rapid debugging and analysis.
 - Modular design that allows future sensors (ultrasonic, LiDAR, depth) to feed into the navigator without architectural changes.
 
 ## Quick Start
 
+### GUI workflow
+
+1. **Initialize the managed environment (first launch only)** so the GUI can install everything inside `.venv/` without tripping PEP 668 protections:
+
+   ```bash
+   python setup_scroot.py --skip-models  # installs dependencies into .venv/
+   source .venv/bin/activate             # or .venv\Scripts\activate on Windows
+   python -m pip install --upgrade pip
+   python -m pip install -r autonomy/requirements.txt
+   ```
+
+   On subsequent runs you only need to activate the virtualenv if it is not already active.
+
+2. **Run the scooter desktop app** and follow the guided setup:
+
+   ```bash
+   python scooter_app.py
+   ```
+
+   The application now bootstraps itself: it scans your hardware, detects whether you are running native Ubuntu, Ubuntu-on-WSL, or Jetson JetPack, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. The setup flow also prepares the Advisor backend you selected—if Torch/Transformers are not available it automatically pivots to the lightweight heuristic Advisor so you can still launch safely. If the host Python refuses system-wide installs (PEP 668 “externally managed environment”), the bootstrapper automatically provisions `.venv/` and re-runs the install inside that sandbox so the GUI still opens with a single command. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
+
+3. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. The live feed now renders lane boundaries, projected trajectory lines, throttle/brake gauges, actuator readouts, advisor verdicts, and any GPS sub-goal bias on top of the camera stream. Drag the pane dividers to resize the camera feed, advisor console, or log window, and scroll the control column when space is tight. Use the messaging panel to see what the advisor plans (ALLOW/AMEND/BLOCK) and send natural-language directives back. The launch controls expose the lightweight or VLM advisor profiles, GPS toggles/serial settings, Advisor mode (normal/strict), Safety Mindset toggle, Ambient cruising, Riding Companion persona, and a **Telemetry Log Folder** picker—choose a directory there to stream a live CSV of every control tick. When no GPU or Transformers packages are present the GUI nudges you toward the ultra-light advisor profile automatically so constrained laptops still get responsive safety guidance.
+   The CSV now opens with a meta row describing the detected platform, GPU fallback status, and the selected camera mode before per-tick telemetry begins.
+
+### Automated environment detection
+
+The one-line launcher (`python scooter_app.py`) always performs a fresh scan before the GUI appears. The bootstrapper logs the detected environment and selects the matching dependency profile automatically:
+
+- **Jetson (JetPack / L4T)** – Uses the Jetson-optimized dependency stack and NVIDIA's Python wheel index so PyTorch/OpenCV align with the JetPack image.
+- **Ubuntu on WSL** – Uses the modern Linux stack but flags the runtime as WSL so you can enable GPU pass-through or USB forwarding as needed.
+- **Native Ubuntu / desktop OS** – Classifies the compute tier (lightweight/standard/performance) and installs the corresponding CPU/GPU libraries.
+
+If the host changes (e.g., you move the SD card to a different Jetson or upgrade your workstation), the cached profile is refreshed automatically at startup.
+
+### Runtime guard & CPU fallback
+
+Each time the pilot boots it checks `torch.cuda.is_available()` and the reported SM capability. If the installed build cannot serve the detected GPU (e.g., Quadro P520 with SM 6.1 or WSL2 without CUDA), the guardrail sets `CUDA_VISIBLE_DEVICES=""`, pins Ultralytics/Transformers to CPU, limits thread counts, and logs `GPU unsupported (SM X.Y). Running CPU-only.` You can still request GPU explicitly with `--device gpu`, but the guard will fall back to CPU whenever the hardware or build cannot satisfy the request. The guard also registers a single atexit hook so the camera stream, telemetry writers, and OpenCV windows shut down without `select()` timeouts or double-free crashes after repeated launches.
+
+### Automatic camera setup
+
+The GUI and CLI both rely on the new **Camera Autopilot** (`camera_autopilot.py`) so any USB webcam you attach “just works,” even when WSL2 or usbipd negotiates an unreliable default mode. At launch the autopilot:
+
+1. Enumerates `/dev/video0` through `/dev/video9`, warning if your user is not in the `video` group.
+2. Optionally reads friendly names from `v4l2-ctl --list-devices` when the tool is installed.
+3. Probes each node using a strict priority plan: `/dev/video0` MJPG 640×480@30, `/dev/video0` MJPG 320×240@15, then the same for `/dev/video1`, followed by any other MJPEG sizes the camera advertises, and finally YUYV 640×480@30 and 320×240@15 as last resorts. Each mode must deliver at least 5 frames inside a one-second window before it is accepted.
+4. Starts a dedicated capture thread with a one-frame buffer, continuously updating the latest frame used by the pilot and GUI overlays.
+5. Monitors for stalls (no frames for ~1.5 s). When a stall occurs it releases the device, retries the working mode once, then automatically falls back to other modes/devices and logs each transition. Rolling FPS and recovery counts are logged every 5 s so you can verify stability. If every attempt fails twice you receive a single error: `No webcam delivered frames. Try reattaching device (usbipd), or a MJPEG-capable camera.`
+
+This logic keeps the camera alive even when usbipd renegotiates after sleep, when `/dev/video0` exposes a “processed” stream that hangs, or when the negotiated FPS is unsupported. You can inspect the same behaviour from the terminal with:
+
+```bash
+python -m camera_autopilot --preview
+```
+
+Environment variables let you override discovery if you ever need to pin a specific node or format:
+
+- `SCROOT_CAMERA_NODE=/dev/video3` forces the autopilot to try that node first.
+- `SCROOT_CAMERA_MODE=MJPG:1280x720@30` injects a custom probe entry before the safe defaults.
+
+Leave them unset to enjoy fully automatic discovery and self-healing.
+
+### Command-line workflow
+
+If you prefer the CLI or need to run headless, you can still launch the pilot directly.
+
 1. **Install dependencies** (Python 3.10+ recommended):
+
+   The easiest path is to reuse the managed environment that the GUI bootstrapper creates.
+
+   ```bash
+   python setup_scroot.py --skip-models  # installs into .venv/
+   source .venv/bin/activate             # or .venv\Scripts\activate on Windows
+   ```
+
+   If you prefer to drive pip manually, run the commands below *inside* that virtual environment so you avoid PEP 668 restrictions:
 
    ```bash
    python -m pip install --upgrade pip
@@ -24,18 +108,18 @@ This package contains a self-contained autonomous driving stack tailored for lig
 
    On Jetson devices you may prefer the Jetson-specific OpenCV or PyTorch builds. Adjust the requirement accordingly if you already have hardware-accelerated packages installed.
 
-2. **Connect your camera** via USB and determine its index (usually `0`).
+2. **Connect your camera** via USB. The Camera Autopilot will probe `/dev/video*` automatically; pass `--cam` if you want to pin a preferred node or RTSP stream.
 
 3. **Launch the pilot** using the unified launcher:
 
    ```bash
-   python autonomy_launcher.py --camera 0 --visualize --command "drive 2 m forward"
+   python autonomy_launcher.py --cam auto --device auto --advisor-mode strict --safety-mindset on --ambient on
    ```
 
-   The launcher checks dependencies, starts the camera, runs perception and control, and prints actuator commands together with the advisor verdict:
+   The launcher checks dependencies, starts the camera, runs perception and the arbitration stack, and prints actuator commands together with the advisor verdict and reasons:
 
    ```text
-   time=3.42s steer=+0.120 throttle=0.320 brake=0.000 directive="stay in bike lane" goal="drive 2 m forward"
+   time=3.42s steer=+0.120 throttle=0.280 brake=0.000 advisor=AMEND reasons=lane_bias_right,vru_slow goal="drive 2 m forward"
    ```
 
    Press `q` in the visualization window or send `Ctrl+C` to exit.
@@ -46,8 +130,9 @@ The launcher accepts several runtime flags:
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--camera` | Camera index or video path | `0` |
-| `--width` / `--height` | Capture resolution | `1280x720` |
+| `--device` | Compute preference (`auto`, `cpu`, or `gpu`) | `auto` |
+| `--cam` | Preferred camera node or stream (`auto` probes everything) | `auto` |
+| `--cam-max-res` | Maximum capture resolution to prioritize during probing | `640x480` |
 | `--fps` | Target frame rate | `30` |
 | `--model` | YOLO model file | `yolov8n.pt` |
 | `--confidence` | Detection confidence threshold | `0.3` |
@@ -56,22 +141,31 @@ The launcher accepts several runtime flags:
 | `--log-dir` | Directory for visualizations and state dumps | `logs/` |
 | `--command` | Initial natural-language goal (e.g. `"drive to the park"`) | None |
 | `--command-file` | Path to a UTF-8 text file that can be updated with new commands | None |
-| `--disable-advisor` | Skip loading the multimodal advisor | Enabled |
+| `--disable-advisor` | Skip the safety advisor and arbitration (not recommended) | Enabled |
 | `--advisor-image-model` | Hugging Face name for the BLIP image encoder | `Salesforce/blip-image-captioning-base` |
 | `--advisor-language-model` | Hugging Face name for the language model | `google/flan-t5-small` |
 | `--advisor-device` | Force the device used by the advisor (`cpu`, `cuda`, etc.) | Auto-detect |
 | `--advisor-state` | JSON file capturing the latest advisor directive | `logs/advisor_state.json` |
 | `--command-state` | JSON file capturing the parsed command | `logs/command_state.json` |
+| `--advisor-mode {strict,normal}` | Choose conservative or balanced arbitration thresholds | `normal` |
+| `--safety-mindset {on,off}` | Enable speed/clearance caps from mindset profiles | `off` |
+| `--ambient {on,off}` | Enable ambient cruising (slow roll only when Advisor allows) | `on` |
+| `--persona {calm_safe,smart_scout,playful}` | Pick narration tone for the riding companion | `calm_safe` |
+| `--vehicle-description` | Human-readable name used in logs and narration context | `Scooter` |
+| `--vehicle-width` / `--vehicle-length` / `--vehicle-height` | Physical dimensions in meters | `0.65 / 1.2 / 1.2` |
+| `--clearance-margin` | Additional lateral buffer per side (meters) | `0.2` |
+| `--calibration-distance` | Distance in meters used to anchor pixel→meter scaling | `2.0` |
+| `--calibration-pixels` | Observed pixel width of the vehicle at the calibration distance | `220.0` |
 
 ## How It Works
 
-1. **CameraSensor** (`autonomy/sensors/camera.py`) continuously streams frames.
+1. **Camera Autopilot** (`camera_autopilot.py`) discovers a reliable capture mode, streams frames, and self-heals if the device stalls.
 2. **ObjectDetector** (`autonomy/perception/object_detection.py`) identifies obstacles using YOLO and returns bounding boxes.
 3. **CommandInterface** (`autonomy/ai/command_interface.py`) parses operator phrases and exposes structured goals.
 4. **Navigator** (`autonomy/planning/navigator.py`) evaluates obstacle density and the active goal to produce a steering bias, target speed, and goal context.
-5. **SituationalAdvisor** (`autonomy/ai/advisor.py`) captions the scene, blends detection metadata with the goal, and emits a short instruction; it can enforce a full stop for compliance events such as stop signs or pedestrians.
-6. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
-7. **AutonomyPilot** (`autonomy/pilot.py`) orchestrates these components, exports telemetry, and prints raw actuator values for integration with your vehicle controller.
+5. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
+6. **ControlArbiter** (`autonomy/control/arbitration.py`) fuses the Pilot proposal with the Advisor verdict, Safety Mindset caps, and SafetyGate clamps to publish the final actuator command.
+7. **Riding Companion** (`autonomy/control/companion.py`) narrates each Advisor decision without blocking the loop, while **TelemetryLogger** (`autonomy/control/telemetry.py`) records JSONL logs for auditing.
 
 ## Command Interface Tips
 
@@ -84,14 +178,46 @@ The launcher accepts several runtime flags:
   - `stop`
 - Any unrecognized text is still passed to the advisor so it can reason about free-form goals.
 
-## Safety Advisor Behavior
+## Advisor Arbitration & Safety Mindset
 
-The advisor enforces conservative behavior:
+The Advisor inspects each control tick and chooses one of three verdicts:
 
-- Stops when YOLO detects `stop sign`, `traffic light`, `person`, or `bicycle` directly ahead.
-- Prioritizes sidewalks or bike lanes in its textual guidance.
-- Raises braking priority when the navigator reports a high hazard score (>0.85 by default).
-- Exports human-readable directives and scene captions for auditing.
+- **ALLOW** – Pilot command passes through (after SafetyGate range checks). Mindset caps still limit throttle.
+- **AMEND** – Advisor publishes a safer command (e.g., steer toward the bike lane, reduce speed near pedestrians).
+- **BLOCK** – Immediate fail-stop (`steer=0`, `throttle=0`, `brake=1`). The scooter holds the stop until risk stays low for the configured debounce window *and* a fresh, safe proposal arrives.
+
+Key triggers:
+
+- **Fail-stop** when time-to-collision drops below the configured `ttc_block_s`, hazard level peaks, lane mismatch is detected, sensor confidence collapses, or the vehicle envelope would collide with nearby obstacles/curbs.
+- **Takeover** (AMEND) when a safer lateral bias exists, vulnerable road users are close, the Safety Mindset cap is exceeded, or lateral clearance tightens and the Advisor nudges away from the hazard.
+- **Timeout** safeguards: if the Advisor exceeds its time budget, the previous verdict persists for one tick, then the system defaults to BLOCK (strict mode defaults immediately).
+
+The optional Safety Mindset applies contextual caps before arbitration. Profiles such as `cautious_pedestrian`, `low_visibility`, and `worst_case_child` adjust maximum speed and minimum clearance. Uncertainty bias further reduces caps when lane confidence is low or perception is degraded.
+
+Ambient mode gates motion when no explicit goal is set—movement occurs only when the Advisor returns ALLOW/AMEND, and throttle is limited to a gentle cruise. The riding companion narrates decisions every ≥2 s (e.g., “Fail-stop: pedestrian crossing ahead”).
+
+### Strict vs Normal Advisor Modes
+
+- **normal** – Balanced thresholds. Advisor AMENDs before BLOCKing when possible, and allows one tick of timeout grace.
+- **strict** – Conservative behavior. Higher confidence required to ALLOW, faster BLOCK response on TTC, longer debounce, and zero timeout grace (defaults to BLOCK on overruns).
+
+### Demo Scenarios
+
+| Scenario | Expected Behavior |
+| --- | --- |
+| Obstacle 1.5 m ahead at cruising speed | Advisor emits `BLOCK` within one tick, SafetyGate holds full brake until obstacle clears + debounce. Logged with reason `ttc_low` and incident entry. |
+| Bike lane available on the right | Advisor issues `AMEND` steering bias right with reduced throttle (`lane_bias_right`), SafetyGate publishes the amended command. |
+| Forced advisor timeout | Latency budget exceeded → previous verdict reused for ≤1 tick, then `BLOCK` with reason `timeout`. |
+| Safety Mindset toggle | With mindset OFF, throttle follows Pilot target. Turning mindset ON lowers `caps_speed` and logs the active profile. |
+| Ambient, uncertain lane | Low lane confidence with ambient ON → Advisor `BLOCK`, scooter remains stopped until confidence recovers. |
+| Companion narration | Messages such as “Fail-stop: pedestrian crossing ahead” appear in logs no more than once every 2 s. |
+
+### Telemetry & Incident Logging
+
+- `logs/telemetry.jsonl` records every tick with advisor decision, reason tags, latency, proposed vs final command, caps, lane context, and navigation sub-goal state.
+- GUI-selected CSV logs (e.g., `pilot_log_*.csv`) mirror each tick with actuator commands, advisor verdicts, lane context, caps, and companion narration for spreadsheet analysis.
+- `logs/incidents.jsonl` captures each AMEND/BLOCK event with a reference to 5 s pre/post clips (populate the clip fields if you archive video). Use these logs to audit fail-stop coverage and advisor timing.
+- Vehicle envelope metadata (lane width estimate, left/right clearance, required clearance) is emitted with each tick so you can audit why the Advisor held, amended, or released control.
 
 ## Extending the System
 

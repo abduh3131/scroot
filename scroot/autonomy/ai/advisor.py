@@ -1,3 +1,5 @@
+"""Advisor backends for interpreting scene context."""
+
 from __future__ import annotations
 
 import logging
@@ -6,7 +8,7 @@ from typing import Iterable, Optional
 
 import numpy as np
 
-try:
+try:  # pragma: no cover - optional for lightweight setups
     import torch
     from transformers import (
         AutoModelForSeq2SeqLM,
@@ -14,12 +16,16 @@ try:
         BlipForConditionalGeneration,
         BlipProcessor,
     )
-except ImportError as exc:  # pragma: no cover - runtime dependency
-    raise ImportError(
-        "The 'transformers' and 'torch' packages are required for the VLM advisor. "
-        "Install them with 'pip install transformers torch'."
-    ) from exc
+    _HAVE_TRANSFORMERS = True
+except ImportError:  # pragma: no cover - handled dynamically
+    torch = None  # type: ignore
+    AutoModelForSeq2SeqLM = None  # type: ignore
+    AutoTokenizer = None  # type: ignore
+    BlipForConditionalGeneration = None  # type: ignore
+    BlipProcessor = None  # type: ignore
+    _HAVE_TRANSFORMERS = False
 
+from autonomy.runtime.runtime_guard import current_device
 from autonomy.utils.data_structures import (
     AdvisorDirective,
     HighLevelCommand,
@@ -32,6 +38,7 @@ from autonomy.utils.data_structures import (
 class AdvisorConfig:
     """Configuration for the situational advisor."""
 
+    backend: str = "vlm"
     image_model: str = "Salesforce/blip-image-captioning-base"
     language_model: str = "google/flan-t5-small"
     device: Optional[str] = None
@@ -45,12 +52,31 @@ class AdvisorConfig:
     )
 
 
-class SituationalAdvisor:
-    """Lightweight VLM/LLM chain that inspects frames and provides driving directives."""
+class BaseAdvisor:
+    def analyze(
+        self,
+        frame: np.ndarray,
+        perception: PerceptionSummary,
+        navigation: NavigationDecision,
+        command: Optional[HighLevelCommand],
+    ) -> AdvisorDirective:
+        raise NotImplementedError
+
+
+class SituationalAdvisor(BaseAdvisor):
+    """Vision-language advisor that inspects frames and provides driving directives."""
 
     def __init__(self, config: AdvisorConfig | None = None) -> None:
+        if not _HAVE_TRANSFORMERS:
+            raise ImportError(
+                "Transformer-based advisor backend requested but the required packages are missing. "
+                "Install 'torch' and 'transformers' or switch to the lightweight advisor."
+            )
         self.config = config or AdvisorConfig()
-        self._device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        runtime_device = current_device()
+        self._device = self.config.device or runtime_device or (
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
 
         logging.info("Loading advisor VLM '%s'", self.config.image_model)
         self._vlm_processor = BlipProcessor.from_pretrained(self.config.image_model)
@@ -138,3 +164,28 @@ class SituationalAdvisor:
             label_counts[obj.label] = label_counts.get(obj.label, 0) + 1
         parts = [f"{count}x {label}" for label, count in sorted(label_counts.items())]
         return ", ".join(parts)
+
+
+def create_advisor(config: AdvisorConfig) -> BaseAdvisor:
+    """Instantiate the requested advisor backend."""
+
+    backend = (config.backend or "vlm").lower()
+    if backend == "lite":
+        from autonomy.ai.lite_advisor import LiteSituationalAdvisor
+
+        return LiteSituationalAdvisor(config)
+    if backend in {"vlm", "default"}:
+        if not _HAVE_TRANSFORMERS:
+            logging.warning(
+                "Transformer-based advisor requested but dependencies are missing; "
+                "falling back to the lightweight advisor."
+            )
+            from autonomy.ai.lite_advisor import LiteSituationalAdvisor
+
+            config.backend = "lite"
+            return LiteSituationalAdvisor(config)
+        return SituationalAdvisor(config)
+    raise ValueError(f"Unknown advisor backend '{config.backend}'")
+
+
+__all__ = ["AdvisorConfig", "SituationalAdvisor", "create_advisor"]
