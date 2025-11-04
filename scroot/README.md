@@ -4,14 +4,15 @@ This package contains a self-contained autonomous driving stack tailored for lig
 
 ## Features
 
-- Camera ingestion pipeline compatible with any USB camera supported by OpenCV.
+- Plug-and-play sensor registry with camera and LiDAR adapters; swap in alternate perception sensors without touching the pilot.
 - Real-time object detection powered by Ultralytics YOLO models (default: `yolov8n.pt`).
 - Hybrid navigation that fuses obstacle density analysis with natural-language operator goals.
-- Safety-aware control layer that outputs normalized actuator commands, brakes for hazards, and honors enforced stops.
+- Mode manager that coordinates `idle`, `cruise`, `summon`, and `emergency_stop` behavior for rider cruise control and remote summon workflows.
+- Guardian safety layer that monitors hazard levels, ingests LiDAR-based proximity checks, enforces slowdowns/hard stops, and surfaces alerts for accessibility cues.
+- Lightweight localization tracker and summon planner that modulate behavior based on multi-sensor confidence.
 - Optional multimodal advisor (BLIP + FLAN-T5) that captions the scene and issues traffic-law-compliant directives ("use the bike lane", "yield", "slow down").
 - Command parser that understands phrases such as "drive to the plaza", "drive 2 m forward", or "turn right" and feeds them into the navigator.
-- Structured state export (`logs/command_state.json`, `logs/advisor_state.json`) for telemetry, remote supervision, or UI dashboards.
-- Modular design that allows future sensors (ultrasonic, LiDAR, depth) to feed into the navigator without architectural changes.
+- Structured state export (`logs/command_state.json`, `logs/advisor_state.json`) plus MCU-friendly CSV logging for telemetry, remote supervision, or UI dashboards.
 
 ## Quick Start
 
@@ -40,6 +41,9 @@ This package contains a self-contained autonomous driving stack tailored for lig
 
    Press `q` in the visualization window or send `Ctrl+C` to exit.
 
+   To record an annotated run without displaying a window, add `--video-output logs/run.mp4`; include `--visualize` if you also want the live preview.
+   The bundled `sample_video.mp4` is only a placeholder clip—replace it with your own road footage or pass a live camera index (such as `--camera 0`) to exercise the stack in a driving scenario.
+
 ## Configuration Options
 
 The launcher accepts several runtime flags:
@@ -47,12 +51,25 @@ The launcher accepts several runtime flags:
 | Flag | Description | Default |
 | --- | --- | --- |
 | `--camera` | Camera index or video path | `0` |
+| `--sensor` | Sensor adapter key registered with the plug-and-play registry | `camera` |
+| `--sensor-arg` | Additional sensor arguments (`KEY=VALUE`, repeatable) | None |
+| `--sensors-config` | JSON file defining one or more sensors via adapter/name/args | None |
 | `--width` / `--height` | Capture resolution | `1280x720` |
 | `--fps` | Target frame rate | `30` |
 | `--model` | YOLO model file | `yolov8n.pt` |
 | `--confidence` | Detection confidence threshold | `0.3` |
 | `--iou` | Detection IoU threshold | `0.4` |
 | `--visualize` | Enable on-screen overlays | Disabled |
+| `--video-output` | Write an annotated MP4 with detections and control overlays | None |
+| `--mode` | Initial operating mode (`idle`, `cruise`, `summon`) | `cruise` |
+| `--cruise-speed` | Max speed (m/s) allowed in cruise mode | `4.5` |
+| `--summon-speed` | Max speed (m/s) allowed in summon mode | `3.0` |
+| `--guardian-slowdown` | Hazard threshold that triggers proactive slowdowns | `0.5` |
+| `--guardian-emergency` | Hazard threshold that forces an emergency stop | `0.85` |
+| `--guardian-min-speed-scale` | Minimum speed multiplier during guardian slowdowns | `0.2` |
+| `--guardian-lidar-slowdown` | LiDAR distance (m) that triggers proactive slowdowns | `2.5` |
+| `--guardian-lidar-stop` | LiDAR distance (m) that forces an emergency stop | `1.0` |
+| `--command-log` | CSV file capturing actuator commands mapped to MCU units | None |
 | `--log-dir` | Directory for visualizations and state dumps | `logs/` |
 | `--command` | Initial natural-language goal (e.g. `"drive to the park"`) | None |
 | `--command-file` | Path to a UTF-8 text file that can be updated with new commands | None |
@@ -62,16 +79,54 @@ The launcher accepts several runtime flags:
 | `--advisor-device` | Force the device used by the advisor (`cpu`, `cuda`, etc.) | Auto-detect |
 | `--advisor-state` | JSON file capturing the latest advisor directive | `logs/advisor_state.json` |
 | `--command-state` | JSON file capturing the parsed command | `logs/command_state.json` |
+| `--steer-center` | Steering servo center in MCU units (e.g., microseconds) | `1500.0` |
+| `--steer-range` | Steering delta applied for `steer=-1/+1` | `400.0` |
+| `--throttle-scale` | Scale factor applied to throttle before sending to MCU | `255.0` |
+| `--throttle-offset` | Offset added to throttle output | `0.0` |
+| `--brake-scale` | Scale factor applied to brake before sending to MCU | `255.0` |
+| `--brake-offset` | Offset added to brake output | `0.0` |
+
+## MCU Integration Workflow
+
+- The pilot prints normalized commands (`steer`, `throttle`, `brake`) alongside MCU-ready values (`steer_hw`, `throttle_hw`, `brake_hw`) each cycle. Adjust the mapping to your hardware with `--steer-center`, `--steer-range`, `--throttle-scale`, `--throttle-offset`, `--brake-scale`, and `--brake-offset`.
+- Provide `--command-log logs/commands.csv` (or another path) to capture every update in a CSV file you can replay or stream to firmware.
+- To keep a live dashboard synchronized, read `logs/command_state.json`, which updates with the latest parsed operator goal, and `logs/advisor_state.json` for advisory directives.
+- Guardian alerts (e.g., `hazard_slowdown`, `hazard_emergency`) show up in both stdout and the command CSV so accessibility UIs can trigger audio or haptic cues.
+
+## Sensor Interface
+
+- Load multiple sensors by supplying a JSON spec: `python autonomy_launcher.py --sensors-config configs/sensors.json`. Each entry should provide an `adapter`, optional `name`, and `args` map. Example:
+
+  ```json
+  [
+    {"adapter": "camera", "name": "front_cam", "args": {"source": 0, "width": 1280, "height": 720}},
+    {"adapter": "lidar", "name": "roof_lidar", "args": {"port": "/dev/ttyUSB0", "baud": 115200}}
+  ]
+  ```
+
+- The first entry designates the primary sensor whose stream feeds the perception stack; the rest remain available through the `SensorManager` for guardian or localization consumers.
+- Use `--sensor` and `--sensor-arg` for quick single-sensor experiments (these flags populate the same spec list under the hood).
+- To add a new adapter, implement a `StreamingSensor` subclass in `autonomy/sensors/`, register it with `global_sensor_registry`, and optionally consume its `SensorSample` outputs within the guardian, navigator, or downstream components.
+- The built-in `LiDARSensor` can replay newline-delimited JSON (`{"ranges": [...], "angle_increment": ...}`) or simple CSV scans; pair it with the guardian's LiDAR thresholds to tighten proximity handling.
+
+## Operating Modes & Guardian
+
+- Select the initial mode with `--mode` (`idle`, `cruise`, or `summon`). Cruise holds rider-selected speed, while summon caps velocity aggressively for autonomous “come-to-me” behavior.
+- `--cruise-speed` and `--summon-speed` set per-mode speed ceilings, letting you tune for sidewalk, bike-lane, or campus policies.
+- The guardian layer enforces slowdowns once hazard scores exceed `--guardian-slowdown` and commands full stops beyond `--guardian-emergency`. Alerts surface through stdout, CSV logging, and the advisor JSON for accessibility tooling.
+- When hazards clear, the mode manager automatically resumes the requested mode so the scooter returns to normal cruise or summon flow.
 
 ## How It Works
 
-1. **CameraSensor** (`autonomy/sensors/camera.py`) continuously streams frames.
+1. **Sensor Registry + CameraSensor** (`autonomy/sensors/__init__.py`, `autonomy/sensors/camera.py`) provide a plug-and-play interface for video and future sensors.
 2. **ObjectDetector** (`autonomy/perception/object_detection.py`) identifies obstacles using YOLO and returns bounding boxes.
 3. **CommandInterface** (`autonomy/ai/command_interface.py`) parses operator phrases and exposes structured goals.
 4. **Navigator** (`autonomy/planning/navigator.py`) evaluates obstacle density and the active goal to produce a steering bias, target speed, and goal context.
-5. **SituationalAdvisor** (`autonomy/ai/advisor.py`) captions the scene, blends detection metadata with the goal, and emits a short instruction; it can enforce a full stop for compliance events such as stop signs or pedestrians.
-6. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
-7. **AutonomyPilot** (`autonomy/pilot.py`) orchestrates these components, exports telemetry, and prints raw actuator values for integration with your vehicle controller.
+5. **Guardian** (`autonomy/safety/guardian.py`) watches hazard levels and priority objects, emitting slowdowns, emergency stops, and accessibility alerts.
+6. **ModeManager** (`autonomy/core/mode_manager.py`) enforces cruise, summon, idle, and emergency modes before commands reach the controller.
+7. **SituationalAdvisor** (`autonomy/ai/advisor.py`) captions the scene, blends detection metadata with the goal, and emits traffic-law-compliant directives or enforced stops.
+8. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
+9. **AutonomyPilot** (`autonomy/pilot.py`) orchestrates these components, exports telemetry, writes annotated video/logs, and prints raw actuator values for MCU integration.
 
 ## Command Interface Tips
 
@@ -93,11 +148,19 @@ The advisor enforces conservative behavior:
 - Raises braking priority when the navigator reports a high hazard score (>0.85 by default).
 - Exports human-readable directives and scene captions for auditing.
 
+## Jetson Deployment Notes
+
+- Install NVIDIA's CUDA-accelerated builds of PyTorch, TorchVision, and OpenCV before running `pip install -r autonomy/requirements.txt`; the pip resolver will reuse the preinstalled wheels.
+- Use GStreamer-backed camera sources when possible. For example: `python autonomy_launcher.py --sensor camera --sensor-arg source='nvarguscamerasrc ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink'`.
+- Set `--advisor-device cuda` to keep multimodal models on the GPU, or disable the advisor on resource-constrained SKUs with `--disable-advisor`.
+- Leverage the MCU mapping options plus `--command-log` to stream PWM/GPIO commands to carrier-board microcontrollers over UART or CAN.
+- For LiDAR integration, install the appropriate vendor SDK, point the `LiDARSensor` adapter at the device (`--sensors-config`), and ensure the user running the pilot has access to the underlying serial/ethernet interface.
+
 ## Extending the System
 
-- **Additional sensors:** Feed their obstacle cues into `Navigator.plan` by augmenting the occupancy map.
-- **Custom models:** Provide a different YOLO checkpoint via `--model` or swap the advisor models with lighter or heavier variants.
-- **Vehicle integration:** Map the normalized actuator outputs to your scooter's control API. For example, scale `steer` to handlebar servo angles and translate `throttle`/`brake` to PWM duty cycles.
+- **Additional sensors:** Implement a `StreamingSensor` adapter in `autonomy/sensors/` and register it so the pilot can auto-discover new cameras, depth sensors, or ultrasonic arrays.
+- **Guardian tuning:** Adjust `GuardianConfig` or supply custom guardian logic to incorporate lane semantics, geofences, and accessibility-specific cues.
+- **Vehicle integration:** Map the normalized actuator outputs to your scooter's control API. For example, scale `steer` to handlebar servo angles and translate `throttle`/`brake` to PWM duty cycles; use the MCU command log to validate mappings.
 
 ## Safety Notice
 

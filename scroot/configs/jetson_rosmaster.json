@@ -1,0 +1,30 @@
+[
+  {
+    "adapter": "camera",
+    "name": "front_camera",
+    "args": {
+      "source": "auto",
+      "probe_sources": [
+        0,
+        "/dev/video0",
+        "/dev/video1"
+      ],
+      "prefer_gstreamer": true,
+      "gstreamer_flip_method": 0,
+      "max_probe_sources": 8,
+      "width": 1280,
+      "height": 720,
+      "fps": 30
+    }
+  },
+  {
+    "adapter": "rosmaster",
+    "name": "sensor_hub",
+    "args": {
+      "port": "/dev/ttyUSB0",
+      "baudrate": 115200,
+      "frame_rate": 30,
+      "auto_reconnect": true
+    }
+  }
+]

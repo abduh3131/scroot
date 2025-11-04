@@ -54,12 +54,12 @@ class SituationalAdvisor:
 
         logging.info("Loading advisor VLM '%s'", self.config.image_model)
         self._vlm_processor = BlipProcessor.from_pretrained(self.config.image_model)
-        self._vlm = BlipForConditionalGeneration.from_pretrained(self.config.image_model)
+        self._vlm = self._load_model(BlipForConditionalGeneration, self.config.image_model)
         self._vlm.to(self._device)
 
         logging.info("Loading advisor LLM '%s'", self.config.language_model)
         self._llm_tokenizer = AutoTokenizer.from_pretrained(self.config.language_model)
-        self._llm = AutoModelForSeq2SeqLM.from_pretrained(self.config.language_model)
+        self._llm = self._load_model(AutoModelForSeq2SeqLM, self.config.language_model)
         self._llm.to(self._device)
 
     def analyze(
@@ -82,6 +82,22 @@ class SituationalAdvisor:
             enforced_stop=bool(enforced_stop),
             caption=caption,
         )
+
+    @staticmethod
+    def _load_model(model_cls, model_id: str, **kwargs):
+        """Load a Hugging Face model preferring safetensors to avoid torch.load restrictions."""
+        try:
+            return model_cls.from_pretrained(model_id, use_safetensors=True, **kwargs)
+        except (ValueError, OSError) as exc:
+            msg = str(exc).lower()
+            if "safetensor" in msg:
+                logging.warning(
+                    "Safetensors weights unavailable for '%s'; falling back to PyTorch checkpoint. "
+                    "Upgrade torch >= 2.6 if you hit a torch.load security warning.",
+                    model_id,
+                )
+                return model_cls.from_pretrained(model_id, **kwargs)
+            raise
 
     def _caption_scene(self, frame: np.ndarray) -> str:
         inputs = self._vlm_processor(images=frame, return_tensors="pt").to(self._device)

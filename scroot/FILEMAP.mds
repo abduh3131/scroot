@@ -12,6 +12,8 @@ This document walks through every artifact under `scroot/`, outlines how the pie
 | `setup_scroot.py` | One-shot bootstrap script that creates a virtual environment, installs dependencies, and caches pretrained models. |
 | `autonomy/` | Python package implementing sensing, perception, AI assistants, planning, control, and shared utilities. |
 | `autonomy_launcher.py` | Single-entry launch script that wires CLI arguments into the `AutonomyPilot` orchestrator and performs dependency checks before boot. |
+| `configs/` | Sample JSON specs for multi-sensor deployments (Jetson CSI + Rosmaster, etc.). |
+| `sample_video.mp4` | Placeholder clip bundled for quick smoke tests—replace with real road footage or a live camera feed for meaningful runs. |
 
 ## Dependency Versions and Rationale
 
@@ -36,19 +38,32 @@ Jetson deployments can swap in vendor-optimized wheels as long as the versions m
 The `autonomy` package is deliberately split into feature-oriented subpackages. Each module below can be tested or replaced independently.
 
 ### `autonomy/__init__.py`
-Exports convenience imports so downstream code can instantiate `AutonomyPilot` and configuration dataclasses without deep module paths.
+Exports convenience imports so downstream code can instantiate the pilot, guardian, and mode manager components without digging into subpackages.
 
 ### `autonomy/pilot.py`
 Central orchestrator that binds sensors, perception, navigation, advisor, and control. The `AutonomyPilot` class exposes a `run()` generator yielding raw `ActuatorCommand` tuples (`steer`, `throttle`, `brake`). It handles:
 - Camera startup and graceful shutdown.
 - Polling the natural-language `CommandInterface`.
 - Passing frames through the `ObjectDetector` and `Navigator` to compute motion plans.
+- Running the safety `Guardian` and high-level `ModeManager` to coordinate cruise, summon, idle, and emergency-stop transitions.
 - Invoking the `SituationalAdvisor` to enrich decisions with traffic-law directives and emergency stops.
 - Feeding `NavigationDecision` objects into the `Controller` for smoothing and actuator scaling.
-- Persisting telemetry JSON and optional visualization overlays.
+- Persisting telemetry JSON, optional visualization overlays, annotated MP4 output, and CSV actuator logs mapped into MCU-friendly units.
 
 ### `autonomy/sensors/camera.py`
-Defines `CameraSensor`, a thin wrapper around OpenCV’s `VideoCapture` that exposes a frame iterator with resolution/FPS controls and lifecycle management tailored for USB cameras.
+Defines `CameraSensor`, an OpenCV-backed capture wrapper that now auto-discovers USB devices, scans `/dev/video*`, and synthesizes Jetson CSI GStreamer pipelines with optional flip-method and probe controls.
+
+### `autonomy/sensors/base.py`
+Defines the abstract `Sensor`/`StreamingSensor` interfaces and the global sensor registry so new adapters (depth cameras, IMUs, ultrasonic arrays) can be discovered without touching the pilot.
+
+### `autonomy/sensors/manager.py`
+Creates a `SensorManager` that instantiates specs declared in configuration, starts/stops them as a group, and exposes unified `SensorSample` streams for the pilot, guardian, and localization modules.
+
+### `autonomy/sensors/lidar.py`
+Implements a configurable LiDAR adapter capable of replaying logged scans (JSON/CSV) or generating synthetic data for tests; registered under the `lidar` adapter key.
+
+### `autonomy/sensors/rosmaster.py`
+Serial bridge for the Yahboom Rosmaster X3 controller. Reads newline-delimited packets over `pyserial`, parses JSON or key/value telemetry, and exposes them to the pilot as structured sensor samples with automatic reconnection.
 
 ### `autonomy/perception/object_detection.py`
 Wraps Ultralytics YOLO to produce `PerceptionSummary` objects containing detections, obstacle density metrics, and frame metadata. Configuration toggles allow adjusting model name, confidence, and IoU thresholds.
@@ -62,6 +77,12 @@ Implements the multimodal `SituationalAdvisor` that fuses YOLO detections with B
 ### `autonomy/planning/navigator.py`
 Holds the `Navigator`, which converts perception results and parsed commands into `NavigationDecision` outputs. Responsibilities include hazard scoring, speed targets, steering bias computation, and goal tracking for distance-based maneuvers.
 
+### `autonomy/planning/localization.py`
+Maintains a coarse localization confidence score derived from multi-sensor samples (e.g., LiDAR) so summon mode can respond to perception quality.
+
+### `autonomy/planning/summon.py`
+Summon planner that modulates navigation decisions based on localization quality while operating in `VehicleMode.SUMMON`.
+
 ### `autonomy/control/controller.py`
 Translates navigation decisions into normalized actuator commands. Implements PID-style smoothing, braking prioritization during hazards or enforced stops, and ensures outputs stay within [-1, 1] bounds expected by downstream actuators.
 
@@ -70,6 +91,12 @@ Defines the shared dataclasses (`ActuatorCommand`, `PerceptionObject`, `Navigati
 
 ### `autonomy/utils/filters.py`
 Contains helper functions for exponential smoothing of speed/steering signals, reducing oscillations in tight spaces.
+
+### `autonomy/core/mode_manager.py`
+Defines `ModeManager` and `ModeManagerConfig`, enforcing cruise/summon/idle/emergency transitions and applying guardian overrides before actuator commands are generated.
+
+### `autonomy/safety/guardian.py`
+Implements the safety guardian that inspects perception and navigation outputs, produces slowdown/stop decisions, and emits accessibility alerts consumed by the pilot and downstream UIs.
 
 ## Documentation Assets
 
@@ -81,16 +108,18 @@ Contains helper functions for exponential smoothing of speed/steering signals, r
 The single entry point for operators. Responsibilities:
 - Validates Python package dependencies before importing the heavy modules, providing actionable error messages if something is missing.
 - Parses CLI arguments for camera setup, YOLO configuration, advisor toggles, and logging destinations.
-- Instantiates `AutonomyPilot` and iterates through its command generator, printing each actuator triple alongside advisor guidance for integration with low-level motor controllers.
+- Instantiates `AutonomyPilot` and iterates through its command generator, printing normalized actuator triples together with MCU-mapped values and advisor guidance for integration with low-level motor controllers.
 
 ## Data Flow Summary
 
 1. `autonomy_launcher.py` constructs `AutonomyPilot` using CLI-specified configuration.
-2. `CameraSensor` streams frames. `ObjectDetector` converts them into detection lists.
+2. The sensor registry instantiates the requested adapter (default `CameraSensor`) and streams frames; `ObjectDetector` converts them into detection lists.
 3. `CommandInterface` delivers the latest high-level goal (if any).
 4. `Navigator` evaluates detections plus goals to produce steering/speed intents.
-5. `SituationalAdvisor` (optional) analyzes frames and detections to append directives or trigger stops.
-6. `Controller` generates final actuator outputs, which the launcher prints or forwards.
-7. `AutonomyPilot` continuously exports JSON state for external monitoring and respects stop signals for safe shutdowns.
+5. `Guardian` inspects hazard scores and priority objects, emitting slowdowns or enforced stops for accessibility and safety.
+6. `ModeManager` applies cruise/summon/idle policies before forwarding targets to the controller.
+7. `SituationalAdvisor` (optional) analyzes frames and detections to append directives or trigger stops.
+8. `Controller` generates final actuator outputs, which the launcher prints or forwards.
+9. `AutonomyPilot` continuously exports JSON/video/CSV telemetry and respects stop signals for safe shutdowns.
 
 With this map, new engineers can trace any actuator value back to its upstream source and adjust modules without breaking the surrounding system.

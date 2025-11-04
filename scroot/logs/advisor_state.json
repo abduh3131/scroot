@@ -1,0 +1,12 @@
+{
+  "directive": "",
+  "enforced_stop": true,
+  "caption": "a woman sitting on the beach looking at the ocean",
+  "goal_context": "cruise",
+  "mode": "emergency_stop",
+  "hazard_level": 1.0,
+  "guardian_alerts": [
+    "hazard_emergency",
+    "priority_object"
+  ]
+}

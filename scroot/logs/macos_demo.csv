@@ -1,0 +1,2 @@
+time_s,mode,desired_speed_mps,hazard_level,steer,throttle,brake,steer_hw,throttle_hw,brake_hw,guardian_alerts
+425.643,emergency_stop,0.000,1.000,0.0000,0.0000,1.0000,1500.00,0.00,255.00,"hazard_emergency,priority_object"

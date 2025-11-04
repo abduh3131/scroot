@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Dict, List, Optional, Tuple
+
+
+class VehicleMode(str, Enum):
+    """High level autonomous operating modes."""
+
+    IDLE = "idle"
+    CRUISE = "cruise"
+    SUMMON = "summon"
+    EMERGENCY_STOP = "emergency_stop"
 
 
 @dataclass(frozen=True)
@@ -46,6 +56,7 @@ class NavigationDecision:
     directive: str = ""
     caption: str = ""
     goal_context: str = ""
+    mode: VehicleMode = VehicleMode.CRUISE
 
 
 @dataclass(frozen=True)

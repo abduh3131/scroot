@@ -5,6 +5,8 @@ This package contains a self-contained autonomous driving stack tailored for lig
 ## Features
 
 - Camera ingestion pipeline compatible with any USB camera supported by OpenCV.
+- Jetson-friendly camera discovery that auto-probes USB indexes, `/dev/video*` entries, and CSI pipelines with optional GStreamer backends.
+- Serial bridge adapter for the Yahboom Rosmaster X3 so auxiliary sensors can stream into the autonomy stack.
 - Real-time object detection powered by Ultralytics YOLO models (default: `yolov8n.pt`).
 - Hybrid navigation that fuses obstacle density analysis with natural-language operator goals.
 - Safety-aware control layer that outputs normalized actuator commands, brakes for hazards, and honors enforced stops.
@@ -29,7 +31,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
    source .venv/bin/activate
    ```
 
-3. **Connect your camera** via USB and determine its index (usually `0`).
+3. **Connect your camera**. USB devices usually show up as index `0`; on Jetson you can simply pass `--camera auto` or `--camera-csi 0` to let the pilot discover CSI sensors.
 
 4. **Launch the pilot** using the unified launcher:
 
@@ -42,6 +44,8 @@ This package contains a self-contained autonomous driving stack tailored for lig
    ```text
    time=3.42s steer=+0.120 throttle=0.320 brake=0.000 directive="stay in bike lane" goal="drive 2 m forward"
    ```
+
+   Tip for Jetson: try `python autonomy_launcher.py --camera auto --camera-gstreamer --camera-max-probe 8` to cycle through USB devices, or `--camera-csi 0` to bind directly to the first CSI sensor.
 
    Press `q` in the visualization window or send `Ctrl+C` to exit.
 
@@ -63,6 +67,11 @@ The launcher accepts several runtime flags:
 | Flag | Description | Default |
 | --- | --- | --- |
 | `--camera` | Camera index or video path | `0` |
+| `--camera-probe` | Additional camera sources to try before failing (repeatable) | None |
+| `--camera-csi` | Jetson shortcut that generates an `nvarguscamerasrc` pipeline for the given sensor ID | None |
+| `--camera-gstreamer` | Force the pilot to prefer the GStreamer backend while probing | Disabled |
+| `--camera-max-probe` | Number of indices to scan when using `--camera auto` | `6` |
+| `--camera-flip` | `nvvidconv` flip-method used for CSI pipelines | `0` |
 | `--width` / `--height` | Capture resolution | `1280x720` |
 | `--fps` | Target frame rate | `30` |
 | `--model` | YOLO model file | `yolov8n.pt` |
@@ -78,6 +87,12 @@ The launcher accepts several runtime flags:
 | `--advisor-device` | Force the device used by the advisor (`cpu`, `cuda`, etc.) | Auto-detect |
 | `--advisor-state` | JSON file capturing the latest advisor directive | `logs/advisor_state.json` |
 | `--command-state` | JSON file capturing the parsed command | `logs/command_state.json` |
+
+### Jetson & Rosmaster Integration
+
+- Run `python autonomy_launcher.py --camera auto --camera-gstreamer` on a Jetson to sweep through `/dev/video*` devices and fall back to CSI pipelines. Use `--camera-csi <id>` for an explicit CSI sensor.
+- Add auxiliary sensors from the Rosmaster X3 by switching the primary adapter (`--sensor rosmaster --sensor-arg port=/dev/ttyUSB0 --sensor-arg baudrate=115200`) or by supplying a JSON spec (see `configs/jetson_rosmaster.json`).
+- Install `pyserial` inside your virtual environment if you plan to stream Rosmaster packets (`pip install pyserial`). The optional dependency is listed in `autonomy/requirements.txt`.
 
 ## How It Works
 

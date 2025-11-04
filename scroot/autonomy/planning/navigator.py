@@ -5,7 +5,12 @@ from typing import Dict, Iterable, Optional
 
 import numpy as np
 
-from autonomy.utils.data_structures import DetectedObject, HighLevelCommand, NavigationDecision
+from autonomy.utils.data_structures import (
+    DetectedObject,
+    HighLevelCommand,
+    NavigationDecision,
+    VehicleMode,
+)
 
 
 @dataclass
@@ -108,5 +113,6 @@ class Navigator:
             hazard_level=float(np.clip(hazard_level, 0.0, 1.0)),
             metadata=metadata,
             goal_context=goal_context,
+            mode=VehicleMode.CRUISE,
         )
         return decision
