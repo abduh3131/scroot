@@ -5,6 +5,8 @@ from typing import Iterator, Optional
 
 import cv2
 
+from scroot.utils.camera import open_camera_robust
+
 
 class CameraSensor:
     """Wraps OpenCV capture with sensible defaults for autonomous operation."""
@@ -25,12 +27,21 @@ class CameraSensor:
         self._capture: Optional[cv2.VideoCapture] = None
 
     def _open(self) -> cv2.VideoCapture:
-        capture = cv2.VideoCapture(self.source)
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        capture.set(cv2.CAP_PROP_FPS, self.fps)
-        if not capture.isOpened():
-            raise RuntimeError(f"Unable to open camera source {self.source}")
+        prefer_indices: tuple[int, ...] = ()
+        prefer_paths: tuple[str, ...] = ()
+        if isinstance(self.source, int):
+            prefer_indices = (self.source,) + tuple(i for i in (0, 1, 2, 3) if i != self.source)
+        elif isinstance(self.source, str) and self.source not in {"", "auto"}:
+            prefer_paths = (self.source,) + tuple(
+                p for p in ("/dev/video0", "/dev/video1", "/dev/video2") if p != self.source
+            )
+        capture = open_camera_robust(
+            prefer_indices=prefer_indices or (0, 1, 2, 3),
+            prefer_paths=prefer_paths or ("/dev/video0", "/dev/video1", "/dev/video2"),
+            width=self.width,
+            height=self.height,
+            fps=self.fps,
+        )
         return capture
 
     def frames(self) -> Iterator[tuple[bool, Optional[cv2.Mat]]]:

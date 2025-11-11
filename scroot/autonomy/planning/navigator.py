@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
 import numpy as np
 
-from autonomy.utils.data_structures import DetectedObject, HighLevelCommand, NavigationDecision
+from autonomy.utils.data_structures import (
+    DetectedObject,
+    GPSFix,
+    HighLevelCommand,
+    LaneObservation,
+    NavigationDecision,
+    RoutePlan,
+    VehicleEnvelope,
+)
 
 
 @dataclass
@@ -21,15 +30,23 @@ class NavigatorConfig:
 class Navigator:
     """Generates high level navigation goals using obstacle detections and operator commands."""
 
-    def __init__(self, config: NavigatorConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: NavigatorConfig | None = None,
+        vehicle: Optional[VehicleEnvelope] = None,
+    ) -> None:
         self.config = config or NavigatorConfig()
         self._last_bias = 0.0
+        self._vehicle = vehicle
 
     def plan(
         self,
         detections: Iterable[DetectedObject],
         frame_size: tuple[int, int],
         command: Optional[HighLevelCommand] = None,
+        lane: Optional[LaneObservation] = None,
+        route: Optional[RoutePlan] = None,
+        gps_fix: Optional[GPSFix] = None,
     ) -> NavigationDecision:
         width, height = frame_size
         if width <= 0 or height <= 0:
@@ -42,6 +59,20 @@ class Navigator:
             "obstacle_center": 0.0,
             "obstacle_right": 0.0,
         }
+
+        lane_width_m = 0.0
+        clearance_left_m = float("inf")
+        clearance_right_m = float("inf")
+        nearest_distance_m = float("inf")
+        if self._vehicle:
+            lane_width_m = self._vehicle.estimate_lane_width(width)
+            base_clearance = self._vehicle.required_lateral_clearance()
+            if lane_width_m > 0.0:
+                clearance_left_m = max(0.0, lane_width_m / 2.0 - self._vehicle.width_m / 2.0)
+                clearance_right_m = clearance_left_m
+            else:
+                clearance_left_m = base_clearance
+                clearance_right_m = base_clearance
 
         x_left = width / 3.0
         x_right = 2.0 * width / 3.0
@@ -63,11 +94,39 @@ class Navigator:
             if center_band[0] <= x_center <= center_band[1]:
                 hazard_level = max(hazard_level, min(1.0, area / self.config.emergency_brake_threshold))
 
+            if self._vehicle:
+                distance = self._vehicle.estimate_distance(detection.bbox)
+                nearest_distance_m = min(nearest_distance_m, distance)
+
         metadata.update({
             "obstacle_left": occupancy["left"],
             "obstacle_center": occupancy["center"],
             "obstacle_right": occupancy["right"],
         })
+
+        frame_area = float(width * height)
+        if self._vehicle and frame_area > 0:
+            thirds_area = frame_area / 3.0
+            if clearance_left_m < float("inf"):
+                occupancy_ratio_left = min(1.0, occupancy["left"] / max(thirds_area, 1.0))
+                clearance_left_m = max(
+                    0.0,
+                    clearance_left_m * (1.0 - occupancy_ratio_left),
+                )
+            if clearance_right_m < float("inf"):
+                occupancy_ratio_right = min(1.0, occupancy["right"] / max(thirds_area, 1.0))
+                clearance_right_m = max(
+                    0.0,
+                    clearance_right_m * (1.0 - occupancy_ratio_right),
+                )
+
+        if self._vehicle:
+            metadata["lane_width_m"] = lane_width_m
+            metadata["clearance_left_m"] = clearance_left_m
+            metadata["clearance_right_m"] = clearance_right_m
+            metadata["vehicle_required_clearance_m"] = self._vehicle.required_lateral_clearance()
+            if math.isfinite(nearest_distance_m):
+                metadata["nearest_obstacle_distance_m"] = nearest_distance_m
 
         best_direction = min(occupancy, key=occupancy.get)
         bias_lookup = {"left": -1.0, "center": 0.0, "right": 1.0}
@@ -77,6 +136,18 @@ class Navigator:
             steering_bias = bias_lookup[best_direction]
         else:
             steering_bias = steering_bias * 0.5  # prefer gentle adjustments when the path is clear
+
+        if lane:
+            metadata["lane_confidence"] = lane.confidence
+            metadata["lane_offset_px"] = lane.offset_px
+            if lane.detected and lane.confidence > 0.1:
+                steering_bias = float(
+                    np.clip(
+                        (steering_bias * 0.6) + (-lane.offset_normalized * lane.confidence * 0.8),
+                        -1.0,
+                        1.0,
+                    )
+                )
 
         if abs(steering_bias - self._last_bias) < self.config.hysteresis:
             steering_bias = self._last_bias
@@ -101,6 +172,28 @@ class Navigator:
                 else:  # turn around
                     desired_speed = 0.0
                     hazard_level = max(hazard_level, 0.8)
+
+        if route:
+            metadata["route_distance_m"] = route.distance_m
+            metadata["route_bearing_deg"] = route.bearing_deg
+            if route.eta_s is not None:
+                metadata["route_eta_s"] = route.eta_s
+            heading_error = None
+            if gps_fix and gps_fix.course_deg is not None:
+                heading_error = (route.bearing_deg - gps_fix.course_deg + 540.0) % 360.0 - 180.0
+                metadata["gps_course_deg"] = gps_fix.course_deg
+            elif gps_fix is None:
+                heading_error = None
+            else:
+                heading_error = route.bearing_deg
+            if heading_error is not None:
+                metadata["route_heading_error_deg"] = heading_error
+                steering_bias = float(np.clip(steering_bias * 0.5 + heading_error / 90.0, -1.0, 1.0))
+                if abs(heading_error) > 90:
+                    desired_speed = min(desired_speed, self.config.target_speed_mps * 0.4)
+            if route.distance_m < max(2.0, self._vehicle.required_forward_clearance()) if self._vehicle else False:
+                desired_speed = min(desired_speed, 0.5)
+                hazard_level = max(hazard_level, 0.3)
 
         decision = NavigationDecision(
             steering_bias=float(np.clip(steering_bias, -1.0, 1.0)),
