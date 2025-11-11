@@ -126,6 +126,8 @@ class ScooterApp(tk.Tk):
         recommended_model, recommended_dep = recommend_profiles(self.hardware_profile)
         stored_state = self.state_manager.load_state()
         self.app_state = stored_state or AppState.default(recommended_model, recommended_dep)
+        if not self.hardware_profile.has_cuda:
+            self.app_state.force_cpu = True
         if stored_state is None:
             self.state_manager.save_state(self.app_state)
 
@@ -135,6 +137,8 @@ class ScooterApp(tk.Tk):
         self._last_advisor_verdict: str = ""
         self._last_directive: str = ""
         self._last_companion: str = ""
+        self._video_max_width = 480
+        self._video_max_height = 320
 
         self._build_ui()
         self._render_hardware_summary()
@@ -258,8 +262,17 @@ class ScooterApp(tk.Tk):
             row=5, column=0, columnspan=2, sticky="w"
         )
 
+        initial_cpu_only = self.app_state.force_cpu or (not self.hardware_profile.has_cuda)
+        self.cpu_only_var = tk.BooleanVar(value=initial_cpu_only)
+        ttk.Checkbutton(
+            self.run_frame,
+            text="Force CPU-only mode",
+            variable=self.cpu_only_var,
+            command=self._render_hardware_summary,
+        ).grid(row=6, column=0, columnspan=2, sticky="w")
+
         ttk.Label(self.run_frame, text="Advisor Mode", style="Body.TLabel").grid(
-            row=6, column=0, sticky="w", pady=(8, 0)
+            row=7, column=0, sticky="w", pady=(8, 0)
         )
         self.advisor_mode_var = tk.StringVar(value=self.app_state.advisor_mode)
         ttk.Combobox(
@@ -267,9 +280,9 @@ class ScooterApp(tk.Tk):
             textvariable=self.advisor_mode_var,
             values=["normal", "strict"],
             state="readonly",
-        ).grid(row=6, column=1, sticky="w")
+        ).grid(row=7, column=1, sticky="w")
 
-        ttk.Label(self.run_frame, text="Advisor Model", style="Body.TLabel").grid(row=7, column=0, sticky="w")
+        ttk.Label(self.run_frame, text="Advisor Model", style="Body.TLabel").grid(row=8, column=0, sticky="w")
         self.advisor_model_var = tk.StringVar(value=self.app_state.advisor_model_profile)
         self.advisor_model_combo = ttk.Combobox(
             self.run_frame,
@@ -277,57 +290,62 @@ class ScooterApp(tk.Tk):
             values=list(ADVISOR_MODEL_PROFILES.keys()),
             state="readonly",
         )
-        self.advisor_model_combo.grid(row=7, column=1, sticky="w")
+        self.advisor_model_combo.grid(row=8, column=1, sticky="w")
         self.advisor_model_combo.bind(
             "<<ComboboxSelected>>", lambda _event: self._update_advisor_profile_description()
         )
         self.advisor_model_desc = ttk.Label(
             self.run_frame, style="Body.TLabel", wraplength=400, justify=tk.LEFT
         )
-        self.advisor_model_desc.grid(row=7, column=2, columnspan=2, sticky="w", padx=12)
+        self.advisor_model_desc.grid(row=8, column=2, columnspan=2, sticky="w", padx=12)
 
-        ttk.Label(self.run_frame, text="Safety Mindset", style="Body.TLabel").grid(row=8, column=0, sticky="w")
+        ttk.Label(self.run_frame, text="Safety Mindset", style="Body.TLabel").grid(row=9, column=0, sticky="w")
         self.mindset_var = tk.StringVar(value=self.app_state.safety_mindset)
         ttk.Combobox(
             self.run_frame,
             textvariable=self.mindset_var,
             values=["off", "on"],
             state="readonly",
-        ).grid(row=8, column=1, sticky="w")
+        ).grid(row=9, column=1, sticky="w")
 
-        ttk.Label(self.run_frame, text="Ambient Mode", style="Body.TLabel").grid(row=9, column=0, sticky="w")
+        ttk.Label(self.run_frame, text="Ambient Mode", style="Body.TLabel").grid(row=10, column=0, sticky="w")
         self.ambient_var = tk.StringVar(value=self.app_state.ambient_mode)
         ttk.Combobox(
             self.run_frame,
             textvariable=self.ambient_var,
             values=["on", "off"],
             state="readonly",
-        ).grid(row=9, column=1, sticky="w")
+        ).grid(row=10, column=1, sticky="w")
 
-        ttk.Label(self.run_frame, text="Companion Persona", style="Body.TLabel").grid(row=10, column=0, sticky="w")
+        ttk.Label(self.run_frame, text="Companion Persona", style="Body.TLabel").grid(row=11, column=0, sticky="w")
         self.persona_var = tk.StringVar(value=self.app_state.persona)
         ttk.Combobox(
             self.run_frame,
             textvariable=self.persona_var,
             values=["calm_safe", "smart_scout", "playful"],
             state="readonly",
-        ).grid(row=10, column=1, sticky="w")
+        ).grid(row=11, column=1, sticky="w")
 
         self.start_button = ttk.Button(self.run_frame, text="Start Pilot", command=self._start_pilot)
-        self.start_button.grid(row=11, column=0, pady=(24, 0), sticky="w")
+        self.start_button.grid(row=12, column=0, pady=(24, 0), sticky="w")
 
         self.stop_button = ttk.Button(
             self.run_frame, text="Stop Pilot", command=self._stop_pilot, state=tk.DISABLED
         )
-        self.stop_button.grid(row=11, column=1, pady=(24, 0), sticky="w")
+        self.stop_button.grid(row=12, column=1, pady=(24, 0), sticky="w")
 
         self.video_frame = ttk.LabelFrame(self.run_frame, text="Live Camera & Advisor Overlay")
-        self.video_frame.grid(row=12, column=0, columnspan=4, pady=(16, 0), sticky="nsew")
-        self.video_label = ttk.Label(self.video_frame, text="Video feed will appear here", anchor="center")
-        self.video_label.pack(fill=tk.BOTH, expand=True)
+        self.video_frame.grid(row=13, column=0, columnspan=2, pady=(16, 0), sticky="w")
+        self.video_label = ttk.Label(
+            self.video_frame,
+            text="Video feed will appear here",
+            anchor="center",
+            width=60,
+        )
+        self.video_label.pack(padx=8, pady=8)
 
         telemetry_frame = ttk.Frame(self.run_frame)
-        telemetry_frame.grid(row=13, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        telemetry_frame.grid(row=14, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         telemetry_frame.columnconfigure(1, weight=1)
 
         ttk.Label(telemetry_frame, text="Throttle").grid(row=0, column=0, sticky="w")
@@ -351,7 +369,7 @@ class ScooterApp(tk.Tk):
         ttk.Label(telemetry_frame, textvariable=self.advisor_status, width=18).grid(row=1, column=3, sticky="w")
 
         self.message_frame = ttk.LabelFrame(self.run_frame, text="Advisor Messaging")
-        self.message_frame.grid(row=14, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
+        self.message_frame.grid(row=15, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
         self.message_frame.rowconfigure(0, weight=1)
         self.message_frame.columnconfigure(0, weight=1)
         self.message_text = tk.Text(self.message_frame, height=6, state=tk.DISABLED, wrap=tk.WORD)
@@ -364,11 +382,11 @@ class ScooterApp(tk.Tk):
         self.send_button.grid(row=1, column=2, sticky="e", padx=(6, 0), pady=(6, 0))
 
         self.launch_log = tk.Text(self.run_frame, height=10, width=100, state=tk.DISABLED)
-        self.launch_log.grid(row=15, column=0, columnspan=4, pady=(16, 0), sticky="nsew")
+        self.launch_log.grid(row=16, column=0, columnspan=4, pady=(16, 0), sticky="nsew")
 
-        self.run_frame.rowconfigure(12, weight=3)
-        self.run_frame.rowconfigure(14, weight=1)
+        self.run_frame.rowconfigure(13, weight=3)
         self.run_frame.rowconfigure(15, weight=1)
+        self.run_frame.rowconfigure(16, weight=1)
         self.run_frame.columnconfigure(3, weight=1)
 
     # ------------------------------------------------------------------
@@ -455,13 +473,20 @@ class ScooterApp(tk.Tk):
     # ------------------------------------------------------------------
     # Setup tab actions
     def _render_hardware_summary(self) -> None:
+        runtime_mode = "GPU-enabled" if self.hardware_profile.has_cuda else "CPU-only (no CUDA detected)"
+        if hasattr(self, "cpu_only_var"):
+            if not self.hardware_profile.has_cuda:
+                runtime_mode = "CPU-only (no CUDA detected)"
+            elif self.cpu_only_var.get():
+                runtime_mode = "CPU-only (forced)"
         summary = (
             f"Detected Hardware:\n"
             f"  OS: {self.hardware_profile.os_name} {self.hardware_profile.os_version}\n"
             f"  CPU: {self.hardware_profile.cpu_model} ({self.hardware_profile.cpu_count} cores)\n"
             f"  Memory: {self.hardware_profile.total_memory_gb:.2f} GB\n"
             f"  GPU: {self.hardware_profile.gpu_name or 'None'}\n"
-            f"  Tier: {self.hardware_profile.compute_tier.title()}"
+            f"  Tier: {self.hardware_profile.compute_tier.title()}\n"
+            f"  Runtime Mode: {runtime_mode}"
         )
         self.hardware_label.configure(text=summary)
 
@@ -611,6 +636,7 @@ class ScooterApp(tk.Tk):
         self.app_state.safety_mindset = self.mindset_var.get()
         self.app_state.ambient_mode = self.ambient_var.get()
         self.app_state.persona = self.persona_var.get()
+        self.app_state.force_cpu = bool(self.cpu_only_var.get())
         self.app_state.vehicle_description = self.vehicle_description_var.get().strip() or "Scooter"
         self.app_state.vehicle_width_m = vehicle_settings["width"]
         self.app_state.vehicle_length_m = vehicle_settings["length"]
@@ -640,6 +666,12 @@ class ScooterApp(tk.Tk):
         safety_mindset = SafetyMindsetConfig()
         safety_mindset.enabled = self.mindset_var.get() == "on"
 
+        cpu_only = self.app_state.force_cpu
+        if cpu_only:
+            self._append_launch_log("CPU-only mode enabled; using CPU for all models.")
+        elif not self.hardware_profile.has_cuda:
+            self._append_launch_log("No CUDA GPU detected; models will run on CPU.")
+
         config = PilotConfig(
             camera_source=self.camera_var.get(),
             camera_width=width,
@@ -650,6 +682,7 @@ class ScooterApp(tk.Tk):
             advisor_enabled=self.advisor_var.get(),
             advisor_image_model=advisor_profile.advisor_image_model,
             advisor_language_model=advisor_profile.advisor_language_model,
+            advisor_device="cpu" if cpu_only else None,
             advisor=advisor_settings,
             navigation_intent=navigation_intent,
             safety_mindset=safety_mindset,
@@ -662,6 +695,7 @@ class ScooterApp(tk.Tk):
             vehicle_clearance_margin_m=vehicle_settings["margin"],
             calibration_reference_distance_m=vehicle_settings["calibration_distance"],
             calibration_reference_pixels=vehicle_settings["calibration_pixels"],
+            force_cpu=cpu_only,
         )
 
         self._append_launch_log("Launching autonomy pilot...")
@@ -688,13 +722,36 @@ class ScooterApp(tk.Tk):
         self.pilot_thread.stop()
         self.pilot_thread = None
 
+    def _prepare_video_image(self, frame: np.ndarray) -> Image.Image:
+        height, width = frame.shape[:2]
+        if height <= 0 or width <= 0:
+            blank = np.zeros((self._video_max_height, self._video_max_width, 3), dtype=np.uint8)
+            return Image.fromarray(blank)
+
+        scale_w = self._video_max_width / float(width)
+        scale_h = self._video_max_height / float(height)
+        scale = min(scale_w, scale_h, 1.0)
+        new_width = max(1, int(width * scale))
+        new_height = max(1, int(height * scale))
+
+        if new_width != width or new_height != height:
+            resized = cv2.resize(
+                frame,
+                (new_width, new_height),
+                interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR,
+            )
+        else:
+            resized = frame
+
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(rgb)
+
     def _handle_pilot_tick(self, payload: PilotTickData) -> None:
         def update() -> None:
             self._last_tick_time = payload.timestamp
 
             if payload.overlay is not None:
-                rgb = cv2.cvtColor(payload.overlay, cv2.COLOR_BGR2RGB)
-                image = Image.fromarray(rgb)
+                image = self._prepare_video_image(payload.overlay)
                 self._video_photo = ImageTk.PhotoImage(image=image)
                 self.video_label.configure(image=self._video_photo, text="")
 

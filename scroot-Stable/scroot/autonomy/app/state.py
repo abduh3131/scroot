@@ -29,6 +29,7 @@ class AppState:
     safety_mindset: str
     ambient_mode: str
     persona: str
+    force_cpu: bool
     vehicle_description: str
     vehicle_width_m: float
     vehicle_length_m: float
@@ -56,6 +57,7 @@ class AppState:
             safety_mindset="off",
             ambient_mode="on",
             persona="calm_safe",
+            force_cpu=False,
             vehicle_description="Scooter",
             vehicle_width_m=0.65,
             vehicle_length_m=1.2,
@@ -85,6 +87,7 @@ class AppStateManager:
         data.setdefault("safety_mindset", "off")
         data.setdefault("ambient_mode", "on")
         data.setdefault("persona", "calm_safe")
+        data.setdefault("force_cpu", False)
         data.setdefault("vehicle_description", "Scooter")
         data.setdefault("vehicle_width_m", 0.65)
         data.setdefault("vehicle_length_m", 1.2)

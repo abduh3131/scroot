@@ -27,6 +27,7 @@ from autonomy.control.context import ContextAnalyzer
 from autonomy.control.controller import Controller, ControllerConfig
 from autonomy.control.mindset import SafetyMindset
 from autonomy.control.telemetry import TelemetryLogger
+from autonomy.perception.lane_detection import LaneDetector, LaneDetectionResult
 from autonomy.perception.object_detection import ObjectDetector, ObjectDetectorConfig
 from autonomy.planning.navigator import Navigator, NavigatorConfig
 from autonomy.sensors.camera import CameraSensor
@@ -78,6 +79,7 @@ class PilotConfig:
     vehicle_clearance_margin_m: float = 0.2
     calibration_reference_distance_m: float = 2.0
     calibration_reference_pixels: float = 220.0
+    force_cpu: bool = False
 
 
 class AutonomyPilot:
@@ -106,11 +108,13 @@ class AutonomyPilot:
             calibration_reference_pixels=self.config.calibration_reference_pixels,
         )
 
+        detector_device = "cpu" if self.config.force_cpu else None
         self._detector = ObjectDetector(
             ObjectDetectorConfig(
                 model_name=self.config.model_name,
                 confidence_threshold=self.config.confidence_threshold,
                 iou_threshold=self.config.iou_threshold,
+                device=detector_device,
             )
         )
         self._navigator = Navigator(NavigatorConfig(), vehicle=self._vehicle)
@@ -118,10 +122,13 @@ class AutonomyPilot:
         self._controller = Controller(self._controller_config)
         self._advisor = None
         if self.config.advisor_enabled:
+            advisor_device = self.config.advisor_device
+            if self.config.force_cpu:
+                advisor_device = "cpu"
             advisor_config = AdvisorConfig(
                 image_model=self.config.advisor_image_model,
                 language_model=self.config.advisor_language_model,
-                device=self.config.advisor_device,
+                device=advisor_device,
             )
             self._advisor = SituationalAdvisor(advisor_config)
 
@@ -157,6 +164,7 @@ class AutonomyPilot:
         )
         self._telemetry = TelemetryLogger(self.config.log_dir)
         self._companion = RidingCompanion(persona=self.config.companion_persona)
+        self._lane_detector = LaneDetector()
 
     @property
     def latest_decision(self) -> Optional[NavigationDecision]:
@@ -202,6 +210,7 @@ class AutonomyPilot:
                 current_command = self._command_interface.poll()
 
             perception_summary = self._detector.detect(frame)
+            lane_result = self._lane_detector.detect(frame)
             decision = self._navigator.plan(perception_summary.objects, perception_summary.frame_size, current_command)
 
             if current_command and current_command.command_type == "stop":
@@ -273,6 +282,7 @@ class AutonomyPilot:
                     command,
                     arbitration,
                     caps,
+                    lane_result,
                 )
 
             if self._tick_callback and overlay_frame is not None:
@@ -329,9 +339,11 @@ class AutonomyPilot:
         command: ActuatorCommand,
         arbitration,
         caps: SafetyCaps,
+        lanes: LaneDetectionResult,
     ) -> np.ndarray:
         overlay = frame.copy()
         overlay = self._detector.draw_detections(overlay, perception.objects)
+        overlay = LaneDetector.draw_overlay(overlay, lanes)
         height, width = overlay.shape[:2]
         base_y = height - 20
         path_length = max(40, int(height * 0.45))
@@ -604,6 +616,11 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
         default=220.0,
         help="Pixel width of the vehicle at the calibration distance",
     )
+    parser.add_argument(
+        "--force-cpu",
+        action="store_true",
+        help="Run perception and advisor models on CPU even if CUDA is available",
+    )
 
     args = parser.parse_args(argv)
 
@@ -666,6 +683,7 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
         vehicle_clearance_margin_m=args.clearance_margin,
         calibration_reference_distance_m=args.calibration_distance,
         calibration_reference_pixels=args.calibration_pixels,
+        force_cpu=args.force_cpu,
     )
 
 
