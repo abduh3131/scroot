@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -60,46 +61,78 @@ class CommandInterface:
         self._parser = CommandParser()
         self._last_mtime: Optional[float] = None
         self._active_command: Optional[HighLevelCommand] = None
+        self._lock = threading.Lock()
 
         if initial_command:
             self._active_command = self._parser.parse(initial_command)
 
     @property
     def active_command(self) -> Optional[HighLevelCommand]:
-        return self._active_command
+        with self._lock:
+            return self._active_command
 
     def poll(self) -> Optional[HighLevelCommand]:
         if self._command_file is None:
-            return self._active_command
+            return self.active_command
 
         try:
             stat = self._command_file.stat()
         except FileNotFoundError:
             logging.debug("Command file %s not found", self._command_file)
-            return self._active_command
+            return self.active_command
 
-        if self._last_mtime is not None and stat.st_mtime <= self._last_mtime:
-            return self._active_command
+        with self._lock:
+            if self._last_mtime is not None and stat.st_mtime <= self._last_mtime:
+                return self._active_command
+            self._last_mtime = stat.st_mtime
 
-        self._last_mtime = stat.st_mtime
         text = self._command_file.read_text(encoding="utf-8").strip()
         if not text:
             logging.info("Command file cleared; reverting to idle mode")
-            self._active_command = HighLevelCommand(command_type="idle", raw_text="")
-            return self._active_command
+            command = HighLevelCommand(command_type="idle", raw_text="")
+            with self._lock:
+                self._active_command = command
+            return command
 
         logging.info("Loaded new command: %s", text)
-        self._active_command = self._parser.parse(text)
-        return self._active_command
+        command = self._parser.parse(text)
+        with self._lock:
+            self._active_command = command
+        return command
+
+    def submit(self, text: str) -> HighLevelCommand:
+        """Submit a direct operator directive without touching the filesystem."""
+
+        command = self._parser.parse(text)
+        with self._lock:
+            self._active_command = command
+        if self._command_file:
+            try:
+                if not self._command_file.parent.exists():
+                    self._command_file.parent.mkdir(parents=True, exist_ok=True)
+                self._command_file.write_text(text + "\n", encoding="utf-8")
+            except OSError as exc:
+                logging.warning("Failed to persist command to %s: %s", self._command_file, exc)
+        return command
 
     def export_state(self, destination: Path) -> None:
         if not destination.parent.exists():
             destination.parent.mkdir(parents=True, exist_ok=True)
 
         payload = {
-            "command_type": self._active_command.command_type if self._active_command else None,
-            "target": self._active_command.target if self._active_command else None,
-            "distance_m": self._active_command.distance_m if self._active_command else None,
-            "raw_text": self._active_command.raw_text if self._active_command else None,
+            "command_type": None,
+            "target": None,
+            "distance_m": None,
+            "raw_text": None,
         }
+        with self._lock:
+            if self._active_command:
+                payload.update(
+                    {
+                        "command_type": self._active_command.command_type,
+                        "target": self._active_command.target,
+                        "distance_m": self._active_command.distance_m,
+                        "raw_text": self._active_command.raw_text,
+                    }
+                )
         destination.write_text(json.dumps(payload, indent=2), encoding="utf-8")
