@@ -53,6 +53,7 @@ class PilotConfig:
     camera_width: int = 1280
     camera_height: int = 720
     camera_fps: int = 30
+    camera_auto_reconnect: bool = True
     model_name: str = "yolov8n.pt"
     confidence_threshold: float = 0.3
     iou_threshold: float = 0.4
@@ -97,6 +98,7 @@ class AutonomyPilot:
             width=self.config.camera_width,
             height=self.config.camera_height,
             fps=self.config.camera_fps,
+            auto_reconnect=self.config.camera_auto_reconnect,
         )
         self._vehicle = VehicleEnvelope(
             width_m=self.config.vehicle_width_m,
@@ -201,8 +203,11 @@ class AutonomyPilot:
         for success, frame in frame_iterator:
             if not self._running:
                 break
-            if not success or frame is None:
-                logging.warning("Failed to read frame from camera")
+            if not success:
+                logging.info("Camera stream ended or frame retrieval failed; stopping pilot loop")
+                break
+            if frame is None:
+                logging.warning("Received empty frame from camera")
                 continue
 
             current_command: Optional[HighLevelCommand] = None

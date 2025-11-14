@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
-from typing import Callable, Optional
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+from typing import Callable, Optional, TextIO
 
 import cv2
 import numpy as np
@@ -112,6 +114,181 @@ class PilotRunner(threading.Thread):
                 self.log_callback(f"[warn] Unable to submit command: {exc}")
 
 
+class VideoBatchRunner(threading.Thread):
+    """Background job that replays a recorded video through the autonomy pilot."""
+
+    def __init__(
+        self,
+        *,
+        config: PilotConfig,
+        input_path: Path,
+        output_video: Path,
+        output_csv: Path,
+        fps: float,
+        expected_frames: int,
+        log_callback: Callable[[str], None],
+        on_complete: Callable[[bool, Optional[str]], None],
+    ) -> None:
+        super().__init__(daemon=True)
+        self.config = config
+        self.input_path = input_path
+        self.output_video_path = output_video
+        self.output_csv_path = output_csv
+        self._fps = fps
+        self._expected_frames = expected_frames
+        self.log_callback = log_callback
+        self._on_complete = on_complete
+        self._stop_event = threading.Event()
+        self._pilot: Optional[AutonomyPilot] = None
+        self._video_writer: Optional[cv2.VideoWriter] = None
+        self._csv_file: Optional[TextIO] = None
+        self._csv_writer: Optional[csv.writer] = None
+        self._frame_index = 0
+        self._last_progress_log = time.time()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._pilot:
+            self._pilot.stop()
+
+    def run(self) -> None:  # pragma: no cover - interacts with filesystem and heavy models
+        error: Optional[str] = None
+        try:
+            self.log_callback(
+                f"Processing video {self.input_path.name} at {self._fps:.2f} FPS"
+                + (
+                    ""
+                    if self._expected_frames <= 0
+                    else f" (~{self._expected_frames} frames)"
+                )
+            )
+            self._prepare_outputs()
+            self._pilot = AutonomyPilot(self.config, tick_callback=self._handle_tick)
+            for _command in self._pilot.run():
+                if self._stop_event.is_set():
+                    break
+            if self._stop_event.is_set():
+                self.log_callback("Video analysis cancelled by user.")
+            elif self._frame_index == 0:
+                self.log_callback("No frames were processed from the selected video.")
+            else:
+                self.log_callback(
+                    f"Video analysis complete: {self._frame_index} frames exported."
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            error = str(exc)
+            self.log_callback(f"[error] Video processing failed: {exc}")
+        finally:
+            if self._pilot:
+                self._pilot.stop()
+            self._close_streams()
+            if self._on_complete:
+                try:
+                    self._on_complete(error is None and not self._stop_event.is_set(), error)
+                except Exception:  # pragma: no cover - safety
+                    pass
+
+    def _prepare_outputs(self) -> None:
+        self.output_video_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        self._csv_file = self.output_csv_path.open("w", newline="", encoding="utf-8")
+        self._csv_writer = csv.writer(self._csv_file)
+        self._csv_writer.writerow(
+            [
+                "timestamp_s",
+                "steer",
+                "throttle",
+                "brake",
+                "desired_speed",
+                "hazard_level",
+                "advisor_verdict",
+                "advisor_reasons",
+            ]
+        )
+        self._csv_file.flush()
+        self.log_callback(f"Writing actuator CSV to {self.output_csv_path}")
+
+    def _ensure_video_writer(self, frame: np.ndarray) -> None:
+        if self._video_writer is not None:
+            return
+        height, width = frame.shape[:2]
+        if height <= 0 or width <= 0:
+            raise RuntimeError("Unable to determine frame dimensions for video writer")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self._video_writer = cv2.VideoWriter(
+            str(self.output_video_path),
+            fourcc,
+            self._fps if self._fps > 0 else 30.0,
+            (width, height),
+        )
+        if not self._video_writer.isOpened():
+            raise RuntimeError(f"Unable to open video writer at {self.output_video_path}")
+        self.log_callback(f"Writing overlay video to {self.output_video_path}")
+
+    def _handle_tick(self, payload: PilotTickData) -> None:
+        if self._stop_event.is_set():
+            return
+        if self._csv_writer is None or self._csv_file is None:
+            return
+
+        if payload.overlay is not None:
+            try:
+                self._ensure_video_writer(payload.overlay)
+                if self._video_writer is not None:
+                    self._video_writer.write(payload.overlay)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self.log_callback(f"[warn] Failed to write overlay frame: {exc}")
+
+        frame_timestamp = (
+            (self._frame_index / self._fps) if self._fps > 0 else payload.timestamp
+        )
+        verdict = payload.review.verdict.value if payload.review else ""
+        reasons = ",".join(payload.review.reason_tags) if payload.review else ""
+
+        self._csv_writer.writerow(
+            [
+                round(frame_timestamp, 4),
+                round(payload.command.steer, 6),
+                round(payload.command.throttle, 6),
+                round(payload.command.brake, 6),
+                round(payload.decision.desired_speed, 6),
+                round(payload.decision.hazard_level, 6),
+                verdict,
+                reasons,
+            ]
+        )
+        self._csv_file.flush()
+
+        self._frame_index += 1
+        if self._should_log_progress():
+            percent = 0.0
+            if self._expected_frames > 0:
+                percent = min(100.0, (self._frame_index / self._expected_frames) * 100.0)
+            self.log_callback(
+                f"Processed {self._frame_index} frames"
+                + ("" if percent <= 0 else f" ({percent:.1f}% complete)")
+            )
+            self._last_progress_log = time.time()
+
+    def _should_log_progress(self) -> bool:
+        if self._frame_index == 0:
+            return False
+        elapsed = time.time() - self._last_progress_log
+        if elapsed >= 5.0:
+            return True
+        if self._fps > 0:
+            return self._frame_index % max(1, int(self._fps)) == 0
+        return self._frame_index % 30 == 0
+
+    def _close_streams(self) -> None:
+        if self._video_writer is not None:
+            self._video_writer.release()
+            self._video_writer = None
+        if self._csv_file is not None:
+            self._csv_file.close()
+            self._csv_file = None
+            self._csv_writer = None
+
 class ScooterApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -132,6 +309,8 @@ class ScooterApp(tk.Tk):
             self.state_manager.save_state(self.app_state)
 
         self.pilot_thread: Optional[PilotRunner] = None
+        self.video_job: Optional[VideoBatchRunner] = None
+        self._latest_video_outputs: Optional[tuple[Path, Path]] = None
         self._video_photo: Optional[ImageTk.PhotoImage] = None
         self._last_tick_time: float = 0.0
         self._last_advisor_verdict: str = ""
@@ -158,8 +337,10 @@ class ScooterApp(tk.Tk):
 
         self.setup_frame = ttk.Frame(self.notebook, padding=20)
         self.run_frame = ttk.Frame(self.notebook, padding=20)
+        self.video_batch_frame = ttk.Frame(self.notebook, padding=20)
         self.notebook.add(self.setup_frame, text="Setup")
         self.notebook.add(self.run_frame, text="Launch")
+        self.notebook.add(self.video_batch_frame, text="Video Analysis")
 
         # Setup Tab -----------------------------------------------------
         self.hardware_label = ttk.Label(self.setup_frame, style="Body.TLabel", justify=tk.LEFT)
@@ -389,6 +570,9 @@ class ScooterApp(tk.Tk):
         self.run_frame.rowconfigure(16, weight=1)
         self.run_frame.columnconfigure(3, weight=1)
 
+        # Video Analysis Tab -------------------------------------------
+        self._build_video_tab()
+
     # ------------------------------------------------------------------
     def _build_vehicle_section(self) -> None:
         self.vehicle_description_var = tk.StringVar(value=self.app_state.vehicle_description)
@@ -442,6 +626,93 @@ class ScooterApp(tk.Tk):
         ttk.Label(frame, text=hint, style="Body.TLabel", wraplength=720, justify=tk.LEFT).grid(
             row=4, column=0, columnspan=4, sticky="w", pady=(8, 0)
         )
+
+    def _build_video_tab(self) -> None:
+        ttk.Label(
+            self.video_batch_frame,
+            text="Offline Video Analysis",
+            style="Headline.TLabel",
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+
+        ttk.Label(self.video_batch_frame, text="Input Video", style="Body.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(12, 0)
+        )
+        self.video_input_var = tk.StringVar()
+        ttk.Entry(self.video_batch_frame, textvariable=self.video_input_var, width=50).grid(
+            row=1, column=1, sticky="ew", pady=(12, 0)
+        )
+        ttk.Button(
+            self.video_batch_frame,
+            text="Browse...",
+            command=self._browse_video_input,
+        ).grid(row=1, column=2, padx=(8, 0), pady=(12, 0), sticky="w")
+
+        ttk.Label(
+            self.video_batch_frame, text="Output Directory", style="Body.TLabel"
+        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.video_output_dir_var = tk.StringVar()
+        ttk.Entry(
+            self.video_batch_frame,
+            textvariable=self.video_output_dir_var,
+            width=50,
+        ).grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        ttk.Button(
+            self.video_batch_frame,
+            text="Choose...",
+            command=self._browse_video_output_dir,
+        ).grid(row=2, column=2, padx=(8, 0), pady=(8, 0), sticky="w")
+
+        ttk.Label(self.video_batch_frame, text="Output Prefix", style="Body.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(8, 0)
+        )
+        self.video_output_prefix_var = tk.StringVar(value="analysis")
+        ttk.Entry(
+            self.video_batch_frame,
+            textvariable=self.video_output_prefix_var,
+            width=32,
+        ).grid(row=3, column=1, sticky="w", pady=(8, 0))
+
+        initial_cpu_only = self.app_state.force_cpu or (not self.hardware_profile.has_cuda)
+        self.video_cpu_var = tk.BooleanVar(value=initial_cpu_only)
+        cpu_check = ttk.Checkbutton(
+            self.video_batch_frame,
+            text="Force CPU-only mode",
+            variable=self.video_cpu_var,
+        )
+        cpu_check.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        if not self.hardware_profile.has_cuda:
+            cpu_check.state(["disabled"])
+
+        ttk.Label(
+            self.video_batch_frame,
+            text="Run the autonomy stack over a recorded clip and export an annotated video plus actuator CSV.",
+            style="Body.TLabel",
+            wraplength=640,
+            justify=tk.LEFT,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        self.video_start_button = ttk.Button(
+            self.video_batch_frame, text="Process Video", command=self._start_video_batch
+        )
+        self.video_start_button.grid(row=6, column=0, pady=(16, 0), sticky="w")
+        self.video_stop_button = ttk.Button(
+            self.video_batch_frame,
+            text="Cancel",
+            command=self._stop_video_batch,
+            state=tk.DISABLED,
+        )
+        self.video_stop_button.grid(row=6, column=1, pady=(16, 0), sticky="w")
+
+        self.video_log = tk.Text(
+            self.video_batch_frame,
+            height=12,
+            state=tk.DISABLED,
+            wrap=tk.WORD,
+        )
+        self.video_log.grid(row=7, column=0, columnspan=3, pady=(16, 0), sticky="nsew")
+
+        self.video_batch_frame.columnconfigure(1, weight=1)
+        self.video_batch_frame.rowconfigure(7, weight=1)
 
     def _read_vehicle_settings(self) -> dict[str, float]:
         try:
@@ -512,6 +783,11 @@ class ScooterApp(tk.Tk):
 
     def _append_launch_log(self, message: str) -> None:
         self.after(0, lambda: self._write_log(self.launch_log, message))
+
+    def _append_video_log(self, message: str) -> None:
+        if not hasattr(self, "video_log"):
+            return
+        self.after(0, lambda: self._write_log(self.video_log, message))
 
     def _append_message(self, message: str) -> None:
         if not hasattr(self, "message_text"):
@@ -721,6 +997,235 @@ class ScooterApp(tk.Tk):
         self._append_launch_log("Stopping pilot...")
         self.pilot_thread.stop()
         self.pilot_thread = None
+
+    # ------------------------------------------------------------------
+    # Video analysis tab actions
+    def _browse_video_input(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select video file",
+            filetypes=[
+                ("Video Files", "*.mp4 *.mov *.avi *.mkv *.m4v"),
+                ("All Files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        resolved = Path(path).expanduser()
+        self.video_input_var.set(str(resolved))
+        if not self.video_output_dir_var.get():
+            self.video_output_dir_var.set(str(resolved.parent))
+        current_prefix = self.video_output_prefix_var.get().strip()
+        suggested = f"{resolved.stem}_analysis"
+        if not current_prefix or current_prefix == "analysis":
+            self.video_output_prefix_var.set(suggested)
+
+    def _browse_video_output_dir(self) -> None:
+        directory = filedialog.askdirectory(title="Select output directory")
+        if directory:
+            self.video_output_dir_var.set(directory)
+
+    def _start_video_batch(self) -> None:
+        if self.video_job and self.video_job.is_alive():
+            messagebox.showwarning(
+                "Video Analysis", "An offline analysis job is already running."
+            )
+            return
+
+        source = self.video_input_var.get().strip()
+        if not source:
+            messagebox.showerror("Video Analysis", "Please choose a video file to process.")
+            return
+
+        input_path = Path(source).expanduser()
+        if not input_path.exists():
+            messagebox.showerror(
+                "Video Analysis", f"Input video was not found: {input_path}"
+            )
+            return
+
+        output_dir_str = self.video_output_dir_var.get().strip()
+        if not output_dir_str:
+            output_dir = input_path.parent
+            self.video_output_dir_var.set(str(output_dir))
+        else:
+            output_dir = Path(output_dir_str).expanduser()
+
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror(
+                "Video Analysis", f"Unable to create output directory: {exc}"
+            )
+            return
+
+        prefix = self.video_output_prefix_var.get().strip()
+        if not prefix:
+            prefix = f"{input_path.stem}_analysis"
+            self.video_output_prefix_var.set(prefix)
+
+        output_video = output_dir / f"{prefix}_overlay.mp4"
+        output_csv = output_dir / f"{prefix}_actuators.csv"
+        log_dir = output_dir / f"{prefix}_logs"
+
+        capture = cv2.VideoCapture(str(input_path))
+        if not capture.isOpened():
+            messagebox.showerror(
+                "Video Analysis", f"Unable to open video source: {input_path}"
+            )
+            return
+
+        try:
+            width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            fps_value = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+            frame_count_raw = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+            frame_count = (
+                int(frame_count_raw)
+                if frame_count_raw and frame_count_raw > 0
+                else 0
+            )
+        finally:
+            capture.release()
+
+        if width <= 0 or height <= 0:
+            width = int(self.app_state.resolution_width)
+            height = int(self.app_state.resolution_height)
+            self._append_video_log(
+                "Using configured resolution because video metadata was unavailable."
+            )
+
+        if fps_value <= 0:
+            fps_value = float(self.app_state.fps or 30)
+            if fps_value <= 0:
+                fps_value = 30.0
+            self._append_video_log(
+                "Using configured FPS because video metadata was unavailable."
+            )
+
+        camera_fps = max(1, int(round(fps_value)))
+
+        try:
+            vehicle_settings = self._read_vehicle_settings()
+        except ValueError as exc:
+            messagebox.showerror("Video Analysis", str(exc))
+            return
+
+        model_profile = MODEL_PROFILES[self.model_var.get()]
+        advisor_profile = ADVISOR_MODEL_PROFILES[self.advisor_model_var.get()]
+
+        advisor_settings = AdvisorRuntimeConfig()
+        if self.advisor_mode_var.get() == "strict":
+            advisor_settings.mode = "strict"
+            advisor_settings.min_conf_for_allow = 0.7
+            advisor_settings.ttc_block_s = 1.5
+            advisor_settings.block_debounce_ms = 1000
+            advisor_settings.timeout_grace_ticks = 0
+        else:
+            advisor_settings.mode = "normal"
+
+        navigation_intent = NavigationIntentConfig()
+        navigation_intent.ambient_mode = self.ambient_var.get() == "on"
+
+        safety_mindset = SafetyMindsetConfig()
+        safety_mindset.enabled = self.mindset_var.get() == "on"
+
+        advisor_enabled = bool(self.advisor_var.get())
+        cpu_only = bool(self.video_cpu_var.get()) or (not self.hardware_profile.has_cuda)
+
+        self._append_video_log(f"Input: {input_path}")
+        meta_line = f"Resolution: {width}x{height} @ {fps_value:.2f} FPS"
+        if frame_count > 0:
+            meta_line += f" (~{frame_count} frames)"
+        self._append_video_log(meta_line)
+        self._append_video_log(
+            f"Outputs → video: {output_video.name}, actuators: {output_csv.name}"
+        )
+        if cpu_only:
+            self._append_video_log("CPU-only mode enabled for offline analysis.")
+
+        config = PilotConfig(
+            camera_source=str(input_path),
+            camera_width=width,
+            camera_height=height,
+            camera_fps=camera_fps,
+            camera_auto_reconnect=False,
+            model_name=model_profile.yolo_model,
+            visualize=False,
+            log_dir=log_dir,
+            advisor_enabled=advisor_enabled,
+            advisor_image_model=advisor_profile.advisor_image_model,
+            advisor_language_model=advisor_profile.advisor_language_model,
+            advisor_device="cpu" if cpu_only else None,
+            advisor_state_path=None,
+            command_state_path=None,
+            command_file=None,
+            advisor=advisor_settings,
+            navigation_intent=navigation_intent,
+            safety_mindset=safety_mindset,
+            safety_mindset_enabled=safety_mindset.enabled,
+            companion_persona=self.persona_var.get(),
+            vehicle_description=self.vehicle_description_var.get().strip() or "Scooter",
+            vehicle_width_m=vehicle_settings["width"],
+            vehicle_length_m=vehicle_settings["length"],
+            vehicle_height_m=vehicle_settings["height"],
+            vehicle_clearance_margin_m=vehicle_settings["margin"],
+            calibration_reference_distance_m=vehicle_settings["calibration_distance"],
+            calibration_reference_pixels=vehicle_settings["calibration_pixels"],
+            force_cpu=cpu_only,
+        )
+
+        self._latest_video_outputs = (output_video, output_csv)
+
+        def notify(success: bool, error: Optional[str]) -> None:
+            self.after(0, lambda s=success, e=error: self._on_video_job_complete(s, e))
+
+        try:
+            self.video_job = VideoBatchRunner(
+                config=config,
+                input_path=input_path,
+                output_video=output_video,
+                output_csv=output_csv,
+                fps=fps_value,
+                expected_frames=frame_count,
+                log_callback=self._append_video_log,
+                on_complete=notify,
+            )
+        except Exception as exc:
+            self.video_job = None
+            messagebox.showerror("Video Analysis", f"Unable to start analysis: {exc}")
+            return
+
+        self.video_start_button.configure(state=tk.DISABLED)
+        self.video_stop_button.configure(state=tk.NORMAL)
+        self._append_video_log("Starting offline analysis...")
+        self.video_job.start()
+
+    def _stop_video_batch(self) -> None:
+        if not self.video_job:
+            return
+        self._append_video_log("Cancelling video analysis...")
+        self.video_job.stop()
+        self.video_stop_button.configure(state=tk.DISABLED)
+
+    def _on_video_job_complete(self, success: bool, error: Optional[str]) -> None:
+        self.video_job = None
+        self.video_start_button.configure(state=tk.NORMAL)
+        self.video_stop_button.configure(state=tk.DISABLED)
+
+        if success:
+            if self._latest_video_outputs:
+                video_path, csv_path = self._latest_video_outputs
+                self._append_video_log(
+                    f"Saved overlay video to {video_path} and actuator log to {csv_path}"
+                )
+                messagebox.showinfo(
+                    "Video Analysis",
+                    f"Offline analysis complete.\nVideo: {video_path}\nActuators: {csv_path}",
+                )
+        elif error:
+            messagebox.showerror("Video Analysis", f"Video processing failed: {error}")
+        else:
+            self._append_video_log("Video analysis cancelled.")
 
     def _prepare_video_image(self, frame: np.ndarray) -> Image.Image:
         height, width = frame.shape[:2]
