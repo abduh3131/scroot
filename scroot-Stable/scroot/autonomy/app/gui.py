@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, scrolledtext, ttk
 from typing import Callable, Optional
 
 import cv2
@@ -123,11 +123,20 @@ class ScooterApp(tk.Tk):
         self.hardware_profile = self.state_manager.load_hardware() or detect_hardware()
         self.state_manager.save_hardware(self.hardware_profile)
 
+        self._is_jetson_orin = (
+            self.hardware_profile.environment == "jetson"
+            and "orin" in (self.hardware_profile.gpu_name or "").lower()
+        )
+
         recommended_model, recommended_dep = recommend_profiles(self.hardware_profile)
         stored_state = self.state_manager.load_state()
-        self.app_state = stored_state or AppState.default(recommended_model, recommended_dep)
         if stored_state is None:
+            self.app_state = AppState.default(recommended_model, recommended_dep)
+            self._apply_hardware_tuning(initial=True)
             self.state_manager.save_state(self.app_state)
+        else:
+            self.app_state = stored_state
+            self._apply_hardware_tuning(initial=False)
 
         self.pilot_thread: Optional[PilotRunner] = None
         self._video_photo: Optional[ImageTk.PhotoImage] = None
@@ -144,6 +153,73 @@ class ScooterApp(tk.Tk):
 
     # ------------------------------------------------------------------
     # UI construction
+    def _apply_hardware_tuning(self, *, initial: bool) -> None:
+        """Tune defaults for Jetson Orin platforms to prioritise smooth operation."""
+
+        if not self._is_jetson_orin:
+            return
+
+        tuned = False
+
+        if initial or self.app_state.model_profile not in MODEL_PROFILES:
+            self.app_state.model_profile = "jetson_orin"
+            tuned = True
+        elif not initial and self.app_state.model_profile == "standard":
+            self.app_state.model_profile = "jetson_orin"
+            tuned = True
+
+        if initial or self.app_state.dependency_profile not in DEPENDENCY_PROFILES:
+            self.app_state.dependency_profile = "jetson"
+            tuned = True
+        elif not initial and self.app_state.dependency_profile == "modern":
+            self.app_state.dependency_profile = "jetson"
+            tuned = True
+
+        if initial:
+            if self.app_state.advisor_model_profile != "light":
+                self.app_state.advisor_model_profile = "light"
+                tuned = True
+            if self.app_state.resolution_width != 960:
+                self.app_state.resolution_width = 960
+                tuned = True
+            if self.app_state.resolution_height != 544:
+                self.app_state.resolution_height = 544
+                tuned = True
+            if self.app_state.fps != 24:
+                self.app_state.fps = 24
+                tuned = True
+            if self.app_state.enable_visualization:
+                self.app_state.enable_visualization = False
+                tuned = True
+            if not self.app_state.enable_advisor:
+                self.app_state.enable_advisor = True
+                tuned = True
+
+        if tuned and not initial:
+            self.state_manager.save_state(self.app_state)
+
+    def _create_scrolling_text(self, parent: tk.Widget, **kwargs) -> scrolledtext.ScrolledText:
+        widget = scrolledtext.ScrolledText(parent, **kwargs)
+        self._bind_mousewheel(widget)
+        return widget
+
+    def _bind_mousewheel(self, widget: tk.Text) -> None:
+        def _on_mousewheel(event: tk.Event) -> str:
+            delta_units = 0
+            if getattr(event, "delta", 0):
+                delta_units = -1 if event.delta > 0 else 1
+            elif getattr(event, "num", None) == 4:
+                delta_units = -1
+            elif getattr(event, "num", None) == 5:
+                delta_units = 1
+            if delta_units:
+                widget.yview_scroll(delta_units, "units")
+            return "break"
+
+        widget.bind("<MouseWheel>", _on_mousewheel, add="+")
+        widget.bind("<Button-4>", _on_mousewheel, add="+")
+        widget.bind("<Button-5>", _on_mousewheel, add="+")
+
     def _build_ui(self) -> None:
         style = ttk.Style(self)
         style.configure("Headline.TLabel", font=("Segoe UI", 16, "bold"))
@@ -221,7 +297,10 @@ class ScooterApp(tk.Tk):
         )
         self.save_setup_button.grid(row=7, column=1, pady=(24, 0), sticky="w")
 
-        self.setup_log = tk.Text(self.setup_frame, height=10, width=80, state=tk.DISABLED)
+        self.setup_log = self._create_scrolling_text(
+            self.setup_frame, height=10, width=80, wrap=tk.WORD
+        )
+        self.setup_log.configure(state=tk.DISABLED)
         self.setup_log.grid(row=8, column=0, columnspan=4, pady=(24, 0), sticky="nsew")
 
         self.setup_frame.rowconfigure(8, weight=1)
@@ -354,7 +433,10 @@ class ScooterApp(tk.Tk):
         self.message_frame.grid(row=14, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
         self.message_frame.rowconfigure(0, weight=1)
         self.message_frame.columnconfigure(0, weight=1)
-        self.message_text = tk.Text(self.message_frame, height=6, state=tk.DISABLED, wrap=tk.WORD)
+        self.message_text = self._create_scrolling_text(
+            self.message_frame, height=6, wrap=tk.WORD
+        )
+        self.message_text.configure(state=tk.DISABLED)
         self.message_text.grid(row=0, column=0, columnspan=3, sticky="nsew")
         self.command_var = tk.StringVar()
         self.command_entry = ttk.Entry(self.message_frame, textvariable=self.command_var)
@@ -363,7 +445,10 @@ class ScooterApp(tk.Tk):
         self.send_button = ttk.Button(self.message_frame, text="Send", command=self._send_command)
         self.send_button.grid(row=1, column=2, sticky="e", padx=(6, 0), pady=(6, 0))
 
-        self.launch_log = tk.Text(self.run_frame, height=10, width=100, state=tk.DISABLED)
+        self.launch_log = self._create_scrolling_text(
+            self.run_frame, height=10, width=100, wrap=tk.WORD
+        )
+        self.launch_log.configure(state=tk.DISABLED)
         self.launch_log.grid(row=15, column=0, columnspan=4, pady=(16, 0), sticky="nsew")
 
         self.run_frame.rowconfigure(12, weight=3)
@@ -663,6 +748,14 @@ class ScooterApp(tk.Tk):
             calibration_reference_distance_m=vehicle_settings["calibration_distance"],
             calibration_reference_pixels=vehicle_settings["calibration_pixels"],
         )
+
+        if self._is_jetson_orin:
+            config.advisor_device = config.advisor_device or "cuda"
+            if self.model_var.get() == "jetson_orin":
+                config.model_name = MODEL_PROFILES["jetson_orin"].yolo_model
+            config.confidence_threshold = max(config.confidence_threshold, 0.35)
+            config.iou_threshold = max(config.iou_threshold, 0.45)
+            self._append_launch_log("Jetson Orin optimisations enabled (CUDA acceleration).")
 
         self._append_launch_log("Launching autonomy pilot...")
         self.start_button.configure(state=tk.DISABLED)

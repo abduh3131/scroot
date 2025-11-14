@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Union
 
 import cv2
 
@@ -11,7 +11,7 @@ class CameraSensor:
 
     def __init__(
         self,
-        source: int | str = 0,
+        source: Union[int, str] = 0,
         width: int = 1280,
         height: int = 720,
         fps: int = 30,
