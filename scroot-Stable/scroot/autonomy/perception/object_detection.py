@@ -21,6 +21,7 @@ class ObjectDetectorConfig:
     model_name: str = "yolov8n.pt"
     confidence_threshold: float = 0.3
     iou_threshold: float = 0.4
+    device: str | None = None
 
 
 class ObjectDetector:
@@ -29,7 +30,19 @@ class ObjectDetector:
     def __init__(self, config: ObjectDetectorConfig | None = None) -> None:
         self.config = config or ObjectDetectorConfig()
         self._model = YOLO(self.config.model_name)
+
+        device = self.config.device
+        if device is None:
+            try:
+                import torch
+
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            except Exception:  # pragma: no cover - torch optional in CPU-only installs
+                device = "cpu"
+
+        self._model.to(device)
         self._model.fuse()
+        self.device = device
 
     def detect(self, frame: np.ndarray) -> PerceptionSummary:
         results = self._model.predict(

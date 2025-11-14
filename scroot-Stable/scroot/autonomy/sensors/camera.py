@@ -34,7 +34,7 @@ class CameraSensor:
         return capture
 
     def frames(self) -> Iterator[tuple[bool, Optional[cv2.Mat]]]:
-        frame_interval = 1.0 / float(self.fps)
+        frame_interval = 1.0 / float(self.fps) if self.fps > 0 else 0.0
         while True:
             if self._capture is None:
                 self._capture = self._open()
@@ -48,7 +48,8 @@ class CameraSensor:
                 time.sleep(0.1)
                 continue
             yield success, frame
-            time.sleep(frame_interval)
+            if frame_interval > 0.0 and (self.auto_reconnect or isinstance(self.source, int)):
+                time.sleep(frame_interval)
 
     def close(self) -> None:
         if self._capture is not None:
