@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 try:  # Optional dependency that we include in requirements
     import psutil
@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover - torch import error handled downstream
     torch = None  # type: ignore
 
 
-@dataclass(slots=True)
+@dataclass
 class HardwareProfile:
     """Summary of the runtime environment."""
 
@@ -66,7 +66,7 @@ def _read_cpu_model() -> str:
     return platform.processor() or "Unknown CPU"
 
 
-def _detect_gpu() -> tuple[bool, Optional[str]]:
+def _detect_gpu() -> Tuple[bool, Optional[str]]:
     if torch is not None and getattr(torch, "cuda", None):
         try:
             if torch.cuda.is_available():

@@ -9,7 +9,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from autonomy.app.profiles import DependencyProfile
 
@@ -18,7 +18,7 @@ STATUS_PATH = Path("config") / "environment_status.json"
 DEFAULT_VENV_PATH = Path(".venv")
 
 
-@dataclass(slots=True)
+@dataclass
 class EnvironmentPlan:
     dependency_profile: DependencyProfile
     python_executable: str = sys.executable
@@ -36,7 +36,7 @@ class EnvironmentPlan:
         return payload
 
 
-@dataclass(slots=True)
+@dataclass
 class EnvironmentReport:
     executed: bool
     log_path: Path
@@ -44,7 +44,7 @@ class EnvironmentReport:
     error: Optional[str] = None
 
 
-@dataclass(slots=True)
+@dataclass
 class EnvironmentStatus:
     profile_key: str
     python_executable: str
@@ -170,7 +170,7 @@ def _run_pip_install(
     log_path: Path,
     logger: Callable[[str], None],
     header_mode: str,
-) -> tuple[bool, Optional[str]]:
+) -> Tuple[bool, Optional[str]]:
     command = [plan.python_executable, "-m", "pip", "install"]
     if plan.extra_args:
         command.extend(plan.extra_args)

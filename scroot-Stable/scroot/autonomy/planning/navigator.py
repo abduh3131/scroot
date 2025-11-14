@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 
@@ -29,7 +29,7 @@ class Navigator:
 
     def __init__(
         self,
-        config: NavigatorConfig | None = None,
+        config: Optional[NavigatorConfig] = None,
         vehicle: Optional[VehicleEnvelope] = None,
     ) -> None:
         self.config = config or NavigatorConfig()
@@ -39,7 +39,7 @@ class Navigator:
     def plan(
         self,
         detections: Iterable[DetectedObject],
-        frame_size: tuple[int, int],
+        frame_size: Tuple[int, int],
         command: Optional[HighLevelCommand] = None,
     ) -> NavigationDecision:
         width, height = frame_size

@@ -230,7 +230,7 @@ class RuleBasedAdvisor:
         )
 
 
-@dataclass(slots=True)
+@dataclass
 class NavigationIntentManager:
     """Tracks temporary navigation sub-goals."""
 
