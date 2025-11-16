@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple
 from autonomy.app.hardware import HardwareProfile
 
 
-@dataclass(slots=True)
+@dataclass
 class ModelProfile:
     key: str
     label: str
@@ -18,7 +18,7 @@ class ModelProfile:
     advisor_language_model: str
 
 
-@dataclass(slots=True)
+@dataclass
 class AdvisorModelProfile:
     key: str
     label: str
@@ -27,7 +27,7 @@ class AdvisorModelProfile:
     advisor_language_model: str
 
 
-@dataclass(slots=True)
+@dataclass
 class DependencyProfile:
     key: str
     label: str
@@ -60,6 +60,17 @@ MODEL_PROFILES: Dict[str, ModelProfile] = {
         yolo_model="yolov8m.pt",
         advisor_image_model="Salesforce/blip-image-captioning-large",
         advisor_language_model="google/flan-t5-large",
+    ),
+    "jetson_orin": ModelProfile(
+        key="jetson_orin",
+        label="Jetson Orin Optimized",
+        description=(
+            "Tailored defaults for NVIDIA Jetson Orin modules balancing throughput and latency. "
+            "Uses a tuned YOLOv8s checkpoint with advisor models sized for the platform's GPU."
+        ),
+        yolo_model="yolov8s.pt",
+        advisor_image_model="Salesforce/blip-image-captioning-base",
+        advisor_language_model="google/flan-t5-base",
     ),
 }
 
@@ -190,7 +201,11 @@ def recommend_profiles(profile: HardwareProfile) -> tuple[ModelProfile, Dependen
     model_profile = DEFAULT_MODEL_BY_TIER.get(profile.compute_tier, MODEL_PROFILES["lightweight"])
 
     if profile.environment == "jetson":
-        model_profile = MODEL_PROFILES["standard"]
+        gpu_name = (profile.gpu_name or "").lower()
+        if "orin" in gpu_name:
+            model_profile = MODEL_PROFILES["jetson_orin"]
+        else:
+            model_profile = MODEL_PROFILES["standard"]
 
     dep_profile = DEPENDENCY_PROFILES["modern"]
     if profile.environment in DEFAULT_DEPENDENCIES_BY_ENVIRONMENT:

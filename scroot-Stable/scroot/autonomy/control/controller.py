@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from autonomy.utils.data_structures import ActuatorCommand, NavigationDecision
 from autonomy.utils.filters import LowPassFilter
@@ -19,7 +20,7 @@ class ControllerConfig:
 class Controller:
     """Produces raw actuator values from navigation decisions."""
 
-    def __init__(self, config: ControllerConfig | None = None) -> None:
+    def __init__(self, config: Optional[ControllerConfig] = None) -> None:
         self.config = config or ControllerConfig()
         self._steer_filter = LowPassFilter(alpha=self.config.smoothing_alpha)
         self._throttle_filter = LowPassFilter(alpha=self.config.smoothing_alpha)

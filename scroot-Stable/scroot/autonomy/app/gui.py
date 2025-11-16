@@ -5,7 +5,9 @@ from __future__ import annotations
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Callable, Optional
 
 import cv2
@@ -112,6 +114,131 @@ class PilotRunner(threading.Thread):
                 self.log_callback(f"[warn] Unable to submit command: {exc}")
 
 
+class MediaFrameSource:
+    """Lightweight frame iterator that replays an image or video file."""
+
+    IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+    def __init__(self, path: Path, fallback_fps: int = 24) -> None:
+        self.path = path
+        self.fallback_fps = max(1, fallback_fps or 1)
+        self._capture: Optional[cv2.VideoCapture] = None
+        self._image_frame: Optional[np.ndarray] = None
+        self._repeat_frames = 0
+        self.effective_fps: int = self.fallback_fps
+        self.kind = "video"
+
+    def prepare(self) -> None:
+        suffix = self.path.suffix.lower()
+        if suffix in self.IMAGE_EXTENSIONS:
+            frame = cv2.imread(str(self.path))
+            if frame is None:
+                raise RuntimeError(f"Unable to load image {self.path}")
+            self._image_frame = frame
+            self.kind = "image"
+            self.effective_fps = self.fallback_fps
+            self._repeat_frames = max(1, self.fallback_fps)
+            return
+
+        capture = cv2.VideoCapture(str(self.path))
+        if not capture.isOpened():
+            raise RuntimeError(f"Unable to open video {self.path}")
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        if fps and fps > 0:
+            self.effective_fps = int(max(1, round(fps)))
+        else:
+            self.effective_fps = self.fallback_fps
+        self._capture = capture
+        self.kind = "video"
+
+    def frames(self) -> "Iterator[tuple[bool, Optional[np.ndarray]]]":
+        if self.kind == "image" and self._image_frame is not None:
+            for _ in range(self._repeat_frames):
+                yield True, self._image_frame.copy()
+            return
+
+        if self._capture is None:
+            raise RuntimeError("MediaFrameSource not prepared")
+
+        while True:
+            success, frame = self._capture.read()
+            if not success:
+                break
+            yield True, frame
+
+    def close(self) -> None:
+        if self._capture is not None:
+            self._capture.release()
+            self._capture = None
+
+
+class MediaTestWorker(threading.Thread):
+    """Applies the pilot to offline media and records the overlay video."""
+
+    def __init__(
+        self,
+        config: PilotConfig,
+        media_path: Path,
+        output_path: Path,
+        log_callback: Callable[[str], None],
+        frame_callback: Optional[Callable[[np.ndarray, PilotTickData], None]] = None,
+        on_complete: Optional[Callable[[Optional[Path], Optional[str]], None]] = None,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.config = config
+        self.media_path = media_path
+        self.output_path = output_path
+        self.log_callback = log_callback
+        self.frame_callback = frame_callback
+        self.on_complete = on_complete
+        self._writer: Optional[cv2.VideoWriter] = None
+        self._frame_count = 0
+        self._error: Optional[str] = None
+
+    def run(self) -> None:  # pragma: no cover - integrates heavy models
+        try:
+            source = MediaFrameSource(self.media_path, fallback_fps=self.config.camera_fps)
+            self.log_callback(f"Loading {self.media_path.name}...")
+            source.prepare()
+            config = self.config
+            config.visualize = False  # avoid GUI popups during offline playback
+            config.camera_fps = source.effective_fps
+
+            pilot = AutonomyPilot(config, tick_callback=self._handle_tick)
+            pilot._camera = source
+            self.log_callback("Applying pilot to offline media...")
+            for _ in pilot.run():
+                pass
+            self.log_callback("Pilot finished, finalizing video...")
+        except Exception as exc:
+            self._error = str(exc)
+            self.log_callback(f"[error] Media test failed: {exc}")
+        finally:
+            if self._writer is not None:
+                self._writer.release()
+                self._writer = None
+            if self.on_complete:
+                output = self.output_path if self._frame_count > 0 else None
+                self.on_complete(output, self._error)
+
+    def _handle_tick(self, payload: PilotTickData) -> None:
+        overlay = payload.overlay
+        if overlay is None:
+            return
+        if self._writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            height, width = overlay.shape[:2]
+            fps = max(1, getattr(payload, "fps", self.config.camera_fps))
+            self._writer = cv2.VideoWriter(str(self.output_path), fourcc, fps, (width, height))
+            if not self._writer.isOpened():
+                raise RuntimeError(f"Unable to create video writer for {self.output_path}")
+            self.log_callback(f"Recording overlay to {self.output_path}")
+        self._writer.write(overlay)
+        self._frame_count += 1
+        if self.frame_callback:
+            self.frame_callback(overlay, payload)
+
+
 class ScooterApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -123,14 +250,25 @@ class ScooterApp(tk.Tk):
         self.hardware_profile = self.state_manager.load_hardware() or detect_hardware()
         self.state_manager.save_hardware(self.hardware_profile)
 
+        self._is_jetson_orin = (
+            self.hardware_profile.environment == "jetson"
+            and "orin" in (self.hardware_profile.gpu_name or "").lower()
+        )
+
         recommended_model, recommended_dep = recommend_profiles(self.hardware_profile)
         stored_state = self.state_manager.load_state()
-        self.app_state = stored_state or AppState.default(recommended_model, recommended_dep)
         if stored_state is None:
+            self.app_state = AppState.default(recommended_model, recommended_dep)
+            self._apply_hardware_tuning(initial=True)
             self.state_manager.save_state(self.app_state)
+        else:
+            self.app_state = stored_state
+            self._apply_hardware_tuning(initial=False)
 
         self.pilot_thread: Optional[PilotRunner] = None
+        self.media_test_thread: Optional[MediaTestWorker] = None
         self._video_photo: Optional[ImageTk.PhotoImage] = None
+        self._media_test_photo: Optional[ImageTk.PhotoImage] = None
         self._last_tick_time: float = 0.0
         self._last_advisor_verdict: str = ""
         self._last_directive: str = ""
@@ -144,6 +282,101 @@ class ScooterApp(tk.Tk):
 
     # ------------------------------------------------------------------
     # UI construction
+    def _apply_hardware_tuning(self, *, initial: bool) -> None:
+        """Tune defaults for Jetson Orin platforms to prioritise smooth operation."""
+
+        if not self._is_jetson_orin:
+            return
+
+        tuned = False
+
+        if initial or self.app_state.model_profile not in MODEL_PROFILES:
+            self.app_state.model_profile = "jetson_orin"
+            tuned = True
+        elif not initial and self.app_state.model_profile == "standard":
+            self.app_state.model_profile = "jetson_orin"
+            tuned = True
+
+        if initial or self.app_state.dependency_profile not in DEPENDENCY_PROFILES:
+            self.app_state.dependency_profile = "jetson"
+            tuned = True
+        elif not initial and self.app_state.dependency_profile == "modern":
+            self.app_state.dependency_profile = "jetson"
+            tuned = True
+
+        if initial:
+            if self.app_state.advisor_model_profile != "light":
+                self.app_state.advisor_model_profile = "light"
+                tuned = True
+            if self.app_state.resolution_width != 960:
+                self.app_state.resolution_width = 960
+                tuned = True
+            if self.app_state.resolution_height != 544:
+                self.app_state.resolution_height = 544
+                tuned = True
+            if self.app_state.fps != 24:
+                self.app_state.fps = 24
+                tuned = True
+            if self.app_state.enable_visualization:
+                self.app_state.enable_visualization = False
+                tuned = True
+            if not self.app_state.enable_advisor:
+                self.app_state.enable_advisor = True
+                tuned = True
+
+        if tuned and not initial:
+            self.state_manager.save_state(self.app_state)
+
+    def _create_scrolling_text(self, parent: tk.Widget, **kwargs) -> scrolledtext.ScrolledText:
+        widget = scrolledtext.ScrolledText(parent, **kwargs)
+        self._bind_mousewheel(widget)
+        return widget
+
+    def _bind_mousewheel(self, widget: tk.Widget, *, target: Optional[tk.Widget] = None) -> None:
+        scroll_target = target or widget
+        yview_scroll = getattr(scroll_target, "yview_scroll", None)
+        if yview_scroll is None:
+            return
+
+        def _on_mousewheel(event: tk.Event) -> str:
+            delta_units = 0
+            if getattr(event, "delta", 0):
+                delta_units = -1 if event.delta > 0 else 1
+            elif getattr(event, "num", None) == 4:
+                delta_units = -1
+            elif getattr(event, "num", None) == 5:
+                delta_units = 1
+            if delta_units:
+                yview_scroll(delta_units, "units")
+            return "break"
+
+        widget.bind("<MouseWheel>", _on_mousewheel, add="+")
+        widget.bind("<Button-4>", _on_mousewheel, add="+")
+        widget.bind("<Button-5>", _on_mousewheel, add="+")
+
+    def _create_scrollable_tab(self, parent: ttk.Notebook, *, padding: int = 0) -> tuple[ttk.Frame, ttk.Frame]:
+        container = ttk.Frame(parent)
+        canvas = tk.Canvas(container, highlightthickness=0, borderwidth=0)
+        vscroll = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        frame = ttk.Frame(canvas, padding=padding)
+        window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+
+        def _update_scroll_region(_event: tk.Event) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfigure(window_id, width=canvas.winfo_width())
+
+        frame.bind("<Configure>", _update_scroll_region)
+        canvas.bind("<Configure>", _update_scroll_region)
+
+        self._bind_mousewheel(canvas)
+        self._bind_mousewheel(frame, target=canvas)
+
+        return container, frame
+
     def _build_ui(self) -> None:
         style = ttk.Style(self)
         style.configure("Headline.TLabel", font=("Segoe UI", 16, "bold"))
@@ -152,10 +385,18 @@ class ScooterApp(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        self.setup_frame = ttk.Frame(self.notebook, padding=20)
-        self.run_frame = ttk.Frame(self.notebook, padding=20)
-        self.notebook.add(self.setup_frame, text="Setup")
-        self.notebook.add(self.run_frame, text="Launch")
+        self.setup_container, self.setup_frame = self._create_scrollable_tab(
+            self.notebook, padding=20
+        )
+        self.run_container, self.run_frame = self._create_scrollable_tab(
+            self.notebook, padding=20
+        )
+        self.test_container, self.test_frame = self._create_scrollable_tab(
+            self.notebook, padding=20
+        )
+        self.notebook.add(self.setup_container, text="Setup")
+        self.notebook.add(self.run_container, text="Launch")
+        self.notebook.add(self.test_container, text="Media Test")
 
         # Setup Tab -----------------------------------------------------
         self.hardware_label = ttk.Label(self.setup_frame, style="Body.TLabel", justify=tk.LEFT)
@@ -221,7 +462,10 @@ class ScooterApp(tk.Tk):
         )
         self.save_setup_button.grid(row=7, column=1, pady=(24, 0), sticky="w")
 
-        self.setup_log = tk.Text(self.setup_frame, height=10, width=80, state=tk.DISABLED)
+        self.setup_log = self._create_scrolling_text(
+            self.setup_frame, height=10, width=80, wrap=tk.WORD
+        )
+        self.setup_log.configure(state=tk.DISABLED)
         self.setup_log.grid(row=8, column=0, columnspan=4, pady=(24, 0), sticky="nsew")
 
         self.setup_frame.rowconfigure(8, weight=1)
@@ -354,7 +598,10 @@ class ScooterApp(tk.Tk):
         self.message_frame.grid(row=14, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
         self.message_frame.rowconfigure(0, weight=1)
         self.message_frame.columnconfigure(0, weight=1)
-        self.message_text = tk.Text(self.message_frame, height=6, state=tk.DISABLED, wrap=tk.WORD)
+        self.message_text = self._create_scrolling_text(
+            self.message_frame, height=6, wrap=tk.WORD
+        )
+        self.message_text.configure(state=tk.DISABLED)
         self.message_text.grid(row=0, column=0, columnspan=3, sticky="nsew")
         self.command_var = tk.StringVar()
         self.command_entry = ttk.Entry(self.message_frame, textvariable=self.command_var)
@@ -363,13 +610,19 @@ class ScooterApp(tk.Tk):
         self.send_button = ttk.Button(self.message_frame, text="Send", command=self._send_command)
         self.send_button.grid(row=1, column=2, sticky="e", padx=(6, 0), pady=(6, 0))
 
-        self.launch_log = tk.Text(self.run_frame, height=10, width=100, state=tk.DISABLED)
+        self.launch_log = self._create_scrolling_text(
+            self.run_frame, height=10, width=100, wrap=tk.WORD
+        )
+        self.launch_log.configure(state=tk.DISABLED)
         self.launch_log.grid(row=15, column=0, columnspan=4, pady=(16, 0), sticky="nsew")
 
         self.run_frame.rowconfigure(12, weight=3)
         self.run_frame.rowconfigure(14, weight=1)
         self.run_frame.rowconfigure(15, weight=1)
         self.run_frame.columnconfigure(3, weight=1)
+
+        # Media Test Tab ------------------------------------------------
+        self._build_media_test_tab()
 
     # ------------------------------------------------------------------
     def _build_vehicle_section(self) -> None:
@@ -482,6 +735,157 @@ class ScooterApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _build_media_test_tab(self) -> None:
+        ttk.Label(
+            self.test_frame,
+            text=(
+                "Upload a road clip or still photo to replay the pilot offline. "
+                "The AI will annotate the footage with steering, throttle, and lane cues."
+            ),
+            style="Body.TLabel",
+            wraplength=760,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+
+        self.test_media_path_var = tk.StringVar()
+        ttk.Label(self.test_frame, text="Media file", style="Headline.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(18, 0)
+        )
+        path_entry = ttk.Entry(self.test_frame, textvariable=self.test_media_path_var, width=60)
+        path_entry.grid(row=2, column=0, sticky="we", pady=(4, 0))
+        ttk.Button(self.test_frame, text="Browse", command=self._browse_media_file).grid(
+            row=2, column=1, padx=(8, 0), sticky="w", pady=(4, 0)
+        )
+
+        self.test_status_var = tk.StringVar(value="Idle")
+        ttk.Label(self.test_frame, textvariable=self.test_status_var, style="Body.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(12, 0)
+        )
+
+        self.test_output_var = tk.StringVar()
+        ttk.Label(
+            self.test_frame,
+            textvariable=self.test_output_var,
+            style="Body.TLabel",
+            wraplength=760,
+            justify=tk.LEFT,
+        ).grid(row=4, column=0, columnspan=3, sticky="w")
+
+        ttk.Button(self.test_frame, text="Generate Overlay", command=self._start_media_test).grid(
+            row=5, column=0, sticky="w", pady=(10, 0)
+        )
+
+        preview_frame = ttk.LabelFrame(self.test_frame, text="Preview")
+        preview_frame.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(16, 0))
+        self.test_preview_label = ttk.Label(
+            preview_frame,
+            text="Overlay preview will appear here.",
+            anchor="center",
+        )
+        self.test_preview_label.pack(fill=tk.BOTH, expand=True)
+
+        self.test_log = self._create_scrolling_text(
+            self.test_frame,
+            height=10,
+            width=90,
+            wrap=tk.WORD,
+        )
+        self.test_log.configure(state=tk.DISABLED)
+        self.test_log.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(16, 0))
+
+        self.test_frame.rowconfigure(6, weight=3)
+        self.test_frame.rowconfigure(7, weight=1)
+        self.test_frame.columnconfigure(0, weight=1)
+
+    def _browse_media_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select media", filetypes=[("Media", "*.mp4 *.mov *.avi *.mkv *.png *.jpg *.jpeg *.bmp"), ("All", "*.*")]
+        )
+        if path:
+            self.test_media_path_var.set(path)
+
+    def _append_test_log(self, text: str) -> None:
+        def update() -> None:
+            self.test_log.configure(state=tk.NORMAL)
+            self.test_log.insert(tk.END, text + "\n")
+            self.test_log.configure(state=tk.DISABLED)
+            self.test_log.see(tk.END)
+
+        self.after(0, update)
+
+    def _start_media_test(self) -> None:
+        if self.media_test_thread and self.media_test_thread.is_alive():
+            messagebox.showwarning("Media Test", "A media test is already running.")
+            return
+
+        media_path_str = self.test_media_path_var.get().strip()
+        if not media_path_str:
+            messagebox.showerror("Media Test", "Please select an image or video file first.")
+            return
+        media_path = Path(media_path_str).expanduser()
+        if not media_path.exists():
+            messagebox.showerror("Media Test", f"File not found: {media_path}")
+            return
+
+        config_tuple = self._build_pilot_config()
+        if not config_tuple:
+            return
+        config, jetson_note = config_tuple
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path("logs") / "media_tests"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{media_path.stem}_{timestamp}.mp4"
+
+        self.test_status_var.set("Running media test...")
+        self.test_output_var.set("")
+        self._append_test_log(f"Starting offline pilot replay for {media_path}...")
+        if jetson_note:
+            self._append_test_log("Jetson Orin optimisations enabled (CUDA acceleration).")
+
+        self.media_test_thread = MediaTestWorker(
+            config=config,
+            media_path=media_path,
+            output_path=output_path,
+            log_callback=self._append_test_log,
+            frame_callback=self._handle_media_frame,
+            on_complete=self._media_test_finished,
+        )
+        self.media_test_thread.start()
+
+    def _handle_media_frame(self, frame: np.ndarray, payload: PilotTickData) -> None:
+        def update() -> None:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(rgb)
+            self._media_test_photo = ImageTk.PhotoImage(image=image)
+            directive = payload.decision.directive or ""
+            caption = payload.decision.caption or ""
+            summary = (
+                f"steer={payload.command.steer:+.2f} throttle={payload.command.throttle:.2f} "
+                f"brake={payload.command.brake:.2f}"
+            )
+            if directive:
+                summary += f"\nAdvisor: {directive}"
+            elif caption:
+                summary += f"\nAdvisor: {caption}"
+            self.test_preview_label.configure(image=self._media_test_photo, text=summary, compound=tk.TOP)
+
+        self.after(0, update)
+
+    def _media_test_finished(self, output_path: Optional[Path], error: Optional[str]) -> None:
+        def update() -> None:
+            self.media_test_thread = None
+            if error:
+                self.test_status_var.set(f"Failed: {error}")
+            else:
+                self.test_status_var.set("Complete")
+            if output_path:
+                self.test_output_var.set(f"Overlay saved to {output_path}")
+            else:
+                self.test_output_var.set("No video was generated.")
+
+        self.after(0, update)
+
     def _append_setup_log(self, message: str) -> None:
         self.after(0, lambda: self._write_log(self.setup_log, message))
 
@@ -586,19 +990,56 @@ class ScooterApp(tk.Tk):
             messagebox.showwarning("Pilot", "Pilot is already running.")
             return
 
+        config_tuple = self._build_pilot_config()
+        if not config_tuple:
+            return
+        config, jetson_note = config_tuple
+
+        if jetson_note:
+            self._append_launch_log("Jetson Orin optimisations enabled (CUDA acceleration).")
+
+        self._append_launch_log("Launching autonomy pilot...")
+        self.start_button.configure(state=tk.DISABLED)
+        self.stop_button.configure(state=tk.NORMAL)
+
+        def on_stop() -> None:
+            self.after(0, lambda: self.start_button.configure(state=tk.NORMAL))
+            self.after(0, lambda: self.stop_button.configure(state=tk.DISABLED))
+            self._append_launch_log("Pilot stopped.")
+
+        self.pilot_thread = PilotRunner(
+            config,
+            log_callback=self._append_launch_log,
+            on_stop=on_stop,
+            tick_callback=self._handle_pilot_tick,
+        )
+        self.pilot_thread.start()
+
+    def _stop_pilot(self) -> None:
+        if not self.pilot_thread:
+            return
+        self._append_launch_log("Stopping pilot...")
+        self.pilot_thread.stop()
+        self.pilot_thread = None
+
+    def _build_pilot_config(
+        self, *, show_errors: bool = True
+    ) -> Optional[tuple[PilotConfig, bool]]:
         try:
             width = int(self.width_var.get())
             height = int(self.height_var.get())
             fps = int(self.fps_var.get())
         except (TypeError, ValueError):
-            messagebox.showerror("Invalid Input", "Resolution and FPS must be integers.")
-            return
+            if show_errors:
+                messagebox.showerror("Invalid Input", "Resolution and FPS must be integers.")
+            return None
 
         try:
             vehicle_settings = self._read_vehicle_settings()
         except ValueError as exc:
-            messagebox.showerror("Invalid Input", str(exc))
-            return
+            if show_errors:
+                messagebox.showerror("Invalid Input", str(exc))
+            return None
 
         self.app_state.camera_source = self.camera_var.get()
         self.app_state.resolution_width = width
@@ -664,29 +1105,16 @@ class ScooterApp(tk.Tk):
             calibration_reference_pixels=vehicle_settings["calibration_pixels"],
         )
 
-        self._append_launch_log("Launching autonomy pilot...")
-        self.start_button.configure(state=tk.DISABLED)
-        self.stop_button.configure(state=tk.NORMAL)
+        jetson_note = False
+        if self._is_jetson_orin:
+            config.advisor_device = config.advisor_device or "cuda"
+            if self.model_var.get() == "jetson_orin":
+                config.model_name = MODEL_PROFILES["jetson_orin"].yolo_model
+            config.confidence_threshold = max(config.confidence_threshold, 0.35)
+            config.iou_threshold = max(config.iou_threshold, 0.45)
+            jetson_note = True
 
-        def on_stop() -> None:
-            self.after(0, lambda: self.start_button.configure(state=tk.NORMAL))
-            self.after(0, lambda: self.stop_button.configure(state=tk.DISABLED))
-            self._append_launch_log("Pilot stopped.")
-
-        self.pilot_thread = PilotRunner(
-            config,
-            log_callback=self._append_launch_log,
-            on_stop=on_stop,
-            tick_callback=self._handle_pilot_tick,
-        )
-        self.pilot_thread.start()
-
-    def _stop_pilot(self) -> None:
-        if not self.pilot_thread:
-            return
-        self._append_launch_log("Stopping pilot...")
-        self.pilot_thread.stop()
-        self.pilot_thread = None
+        return config, jetson_note
 
     def _handle_pilot_tick(self, payload: PilotTickData) -> None:
         def update() -> None:
