@@ -79,7 +79,14 @@ The Launch tab controls runtime options and lets you start/stop the autonomy loo
 - **Gate tags & caps** appear inside the overlay text whenever the SafetyGate clamps throttle (`caps_speed`, `envelope_stop`, etc.) or when the Safety Mindset imposes a stricter limit.
 - **Advisor Messaging box** records every verdict change and directive in natural language. Use the entry field to send commands such as “drive 3 m forward”, “turn left”, or “stop” without leaving the GUI—the Command Interface parses them immediately.
 
-## 3. Best Practices & Troubleshooting
+## 3. Media Test Tab
+
+- **Media file** lets you browse to any dashcam clip (`.mp4`, `.mov`, `.avi`, `.mkv`) or still photo (`.png`, `.jpg`, `.bmp`).
+- **Generate Overlay** replays that media through the same configuration you set on the Launch tab, so your offline run mirrors the live stack (advisor mode, mindset, resolution, Jetson tuning, etc.).
+- **Preview panel** shows the most recent overlay frame with steering vectors, throttle/brake gauges, lane lines, directives, and narration. It updates while the export runs.
+- **Status text + log** explain exactly what the exporter is doing (loading media, applying the pilot, writing frames). When it finishes, the output `.mp4` path is printed so you can open or share it.
+
+## 4. Best Practices & Troubleshooting
 
 - **First run flow**: Run `python setup_scroot.py --skip-models`, activate `.venv/`, and execute `python -m pip install -r autonomy/requirements.txt` before launching `python scooter_app.py`. The bootstrapper still rescans hardware on each launch; rerun **Install Dependencies** if you switch profiles.
 - **Camera testing**: Use `python autonomy_launcher.py --visualize` after configuring the camera to confirm the feed before a full ride.
