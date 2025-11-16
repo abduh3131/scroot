@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 import numpy as np
 
@@ -37,7 +37,12 @@ class AdvisorConfig:
     device: Optional[str] = None
     max_new_tokens: int = 64
     stop_hazard_threshold: float = 0.85
-    enforce_traffic_classes: tuple[str, ...] = ("stop sign", "traffic light", "person", "bicycle")
+    enforce_traffic_classes: Tuple[str, ...] = (
+        "stop sign",
+        "traffic light",
+        "person",
+        "bicycle",
+    )
     system_prompt: str = (
         "You are a safety co-pilot for a self-driving scooter. Provide concise driving directives "
         "that obey pedestrian and micromobility rules. Prefer shoulder, sidewalk, or bike lane travel, "
@@ -48,7 +53,7 @@ class AdvisorConfig:
 class SituationalAdvisor:
     """Lightweight VLM/LLM chain that inspects frames and provides driving directives."""
 
-    def __init__(self, config: AdvisorConfig | None = None) -> None:
+    def __init__(self, config: Optional[AdvisorConfig] = None) -> None:
         self.config = config or AdvisorConfig()
         self._device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
 

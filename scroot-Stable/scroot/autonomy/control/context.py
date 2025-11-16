@@ -9,7 +9,7 @@ from autonomy.control.config import ContextConfig, NavigationIntentConfig
 from autonomy.utils.data_structures import ContextSnapshot, LaneType, NavigationDecision
 
 
-@dataclass(slots=True)
+@dataclass
 class SceneContext:
     snapshot: ContextSnapshot
     subgoal_hint: Optional[str]
