@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, Union
 
 import cv2
 import numpy as np
@@ -48,7 +48,7 @@ from autonomy.utils.data_structures import (
 
 @dataclass
 class PilotConfig:
-    camera_source: int | str = 0
+    camera_source: Union[int, str] = 0
     camera_width: int = 1280
     camera_height: int = 720
     camera_fps: int = 30
@@ -85,7 +85,7 @@ class AutonomyPilot:
 
     def __init__(
         self,
-        config: PilotConfig | None = None,
+        config: Optional[PilotConfig] = None,
         tick_callback: Optional[Callable[[PilotTickData], None]] = None,
     ) -> None:
         self.config = config or PilotConfig()

@@ -14,7 +14,7 @@ APP_STATE_PATH = Path("config") / "app_state.json"
 HARDWARE_CACHE_PATH = Path("config") / "hardware_profile.json"
 
 
-@dataclass(slots=True)
+@dataclass
 class AppState:
     model_profile: str
     dependency_profile: str

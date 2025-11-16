@@ -14,7 +14,7 @@ from autonomy.utils.data_structures import (
 )
 
 
-@dataclass(slots=True)
+@dataclass
 class SafetyMindsetState:
     active_profile: Optional[str] = None
 
