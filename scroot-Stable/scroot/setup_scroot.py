@@ -2,7 +2,7 @@
 """Bootstrap script for the scooter autonomy stack.
 
 This script creates an isolated Python virtual environment, installs the
-project dependencies, downloads the default perception and advisor models,
+project dependencies, downloads the default perception models,
 and prepares the directory layout expected by ``autonomy_launcher.py``.
 
 Run it from the ``scroot`` directory:
@@ -34,8 +34,6 @@ DEFAULT_MODELS_DIR = ROOT / "models"
 REQUIREMENTS_FILE = ROOT / "autonomy" / "requirements.txt"
 
 YOLO_MODEL = "yolov8n.pt"
-BLIP_MODEL = "Salesforce/blip-image-captioning-base"
-FLAN_MODEL = "google/flan-t5-small"
 
 
 def parse_args() -> argparse.Namespace:
@@ -120,7 +118,6 @@ def download_models(python_exe: Path, models_dir: Path) -> None:
         import json
         from pathlib import Path
 
-        from huggingface_hub import snapshot_download
         from ultralytics import YOLO
 
         models_dir = Path({models_dir!r})
@@ -132,16 +129,6 @@ def download_models(python_exe: Path, models_dir: Path) -> None:
         yolo_model = {YOLO_MODEL!r}
         YOLO(yolo_model)
         summary["yolo"] = yolo_model
-
-        # Download BLIP and FLAN checkpoints into deterministic local folders.
-        blip_repo = {BLIP_MODEL!r}
-        flan_repo = {FLAN_MODEL!r}
-
-        blip_dir = models_dir / "blip"
-        flan_dir = models_dir / "flan"
-
-        snapshot_download(repo_id=blip_repo, local_dir=blip_dir, local_dir_use_symlinks=False)
-        snapshot_download(repo_id=flan_repo, local_dir=flan_dir, local_dir_use_symlinks=False)
 
         manifest_path = models_dir / "manifest.json"
         manifest_path.write_text(json.dumps(summary, indent=2))

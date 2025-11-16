@@ -14,18 +14,16 @@ APP_STATE_PATH = Path("config") / "app_state.json"
 HARDWARE_CACHE_PATH = Path("config") / "hardware_profile.json"
 
 
-@dataclass(slots=True)
+@dataclass
 class AppState:
     model_profile: str
     dependency_profile: str
-    advisor_model_profile: str
+    lane_profile: str
     camera_source: str
     resolution_width: int
     resolution_height: int
     fps: int
     enable_visualization: bool
-    enable_advisor: bool
-    advisor_mode: str
     safety_mindset: str
     ambient_mode: str
     persona: str
@@ -45,14 +43,12 @@ class AppState:
         return cls(
             model_profile=model_profile.key,
             dependency_profile=dependency_profile.key,
-            advisor_model_profile="normal",
+            lane_profile="balanced",
             camera_source="0",
             resolution_width=1280,
             resolution_height=720,
             fps=30,
             enable_visualization=True,
-            enable_advisor=True,
-            advisor_mode="normal",
             safety_mindset="off",
             ambient_mode="on",
             persona="calm_safe",
@@ -80,8 +76,9 @@ class AppStateManager:
         if not self.state_path.exists():
             return None
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        data.setdefault("advisor_mode", "normal")
-        data.setdefault("advisor_model_profile", "normal")
+        data.pop("enable_advisor", None)
+        data.pop("advisor_mode", None)
+        data.setdefault("lane_profile", "balanced")
         data.setdefault("safety_mindset", "off")
         data.setdefault("ambient_mode", "on")
         data.setdefault("persona", "calm_safe")

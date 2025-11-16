@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 
 from autonomy.utils.data_structures import (
     DetectedObject,
     HighLevelCommand,
+    LaneEstimate,
+    MetadataValue,
     NavigationDecision,
     VehicleEnvelope,
 )
@@ -29,7 +31,7 @@ class Navigator:
 
     def __init__(
         self,
-        config: NavigatorConfig | None = None,
+        config: Optional[NavigatorConfig] = None,
         vehicle: Optional[VehicleEnvelope] = None,
     ) -> None:
         self.config = config or NavigatorConfig()
@@ -39,8 +41,9 @@ class Navigator:
     def plan(
         self,
         detections: Iterable[DetectedObject],
-        frame_size: tuple[int, int],
+        frame_size: Tuple[int, int],
         command: Optional[HighLevelCommand] = None,
+        lane_estimate: Optional[LaneEstimate] = None,
     ) -> NavigationDecision:
         width, height = frame_size
         if width <= 0 or height <= 0:
@@ -48,10 +51,11 @@ class Navigator:
 
         occupancy = {"left": 0.0, "center": 0.0, "right": 0.0}
         hazard_level = 0.0
-        metadata: Dict[str, float] = {
+        metadata: Dict[str, MetadataValue] = {
             "obstacle_left": 0.0,
             "obstacle_center": 0.0,
             "obstacle_right": 0.0,
+            "lane_confidence": 0.0,
         }
 
         lane_width_m = 0.0
@@ -114,13 +118,34 @@ class Navigator:
                     clearance_right_m * (1.0 - occupancy_ratio_right),
                 )
 
-        if self._vehicle:
-            metadata["lane_width_m"] = lane_width_m
-            metadata["clearance_left_m"] = clearance_left_m
-            metadata["clearance_right_m"] = clearance_right_m
-            metadata["vehicle_required_clearance_m"] = self._vehicle.required_lateral_clearance()
-            if math.isfinite(nearest_distance_m):
-                metadata["nearest_obstacle_distance_m"] = nearest_distance_m
+        if lane_estimate:
+            metadata["lane_type"] = lane_estimate.lane_type.value
+            metadata["lane_confidence"] = lane_estimate.confidence
+            metadata["lane_curvature_m"] = lane_estimate.curvature_m
+            metadata["lane_offset_m"] = lane_estimate.lateral_offset_m
+            metadata["recommended_bias"] = lane_estimate.recommended_bias
+            if lane_estimate.lane_width_m > 0.0:
+                lane_width_m = lane_estimate.lane_width_m
+                if self._vehicle:
+                    half_lane = lane_width_m / 2.0
+                    half_vehicle = self._vehicle.width_m / 2.0
+                    clearance_left_m = self._vehicle.normalize_clearance(
+                        half_lane + lane_estimate.lateral_offset_m - half_vehicle
+                    )
+                    clearance_right_m = self._vehicle.normalize_clearance(
+                        half_lane - lane_estimate.lateral_offset_m - half_vehicle
+                    )
+            steering_bias = float(np.clip(steering_bias + lane_estimate.recommended_bias * 0.5, -1.0, 1.0))
+            if lane_estimate.confidence > 0.5 and self._vehicle:
+                offset_ratio = abs(lane_estimate.lateral_offset_m) / max(
+                    self._vehicle.required_lateral_clearance(),
+                    0.1,
+                )
+                hazard_level = max(hazard_level, min(1.0, offset_ratio * 0.5))
+            if abs(lane_estimate.recommended_bias) > 0.2:
+                metadata["safer_lane_available"] = (
+                    "left" if lane_estimate.recommended_bias < 0 else "right"
+                )
 
         best_direction = min(occupancy, key=occupancy.get)
         bias_lookup = {"left": -1.0, "center": 0.0, "right": 1.0}
@@ -162,4 +187,13 @@ class Navigator:
             metadata=metadata,
             goal_context=goal_context,
         )
+        if self._vehicle:
+            decision.metadata.setdefault("lane_width_m", lane_width_m)
+            decision.metadata.setdefault("clearance_left_m", clearance_left_m)
+            decision.metadata.setdefault("clearance_right_m", clearance_right_m)
+            decision.metadata.setdefault(
+                "vehicle_required_clearance_m", self._vehicle.required_lateral_clearance()
+            )
+            if math.isfinite(nearest_distance_m):
+                decision.metadata["nearest_obstacle_distance_m"] = nearest_distance_m
         return decision

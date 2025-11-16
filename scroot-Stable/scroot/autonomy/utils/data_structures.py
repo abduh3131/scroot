@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -29,12 +29,15 @@ class DetectedObject:
 
 @dataclass(frozen=True)
 class HighLevelCommand:
-    """Structured operator intent for the navigator and advisor."""
+    """Structured operator intent for the navigator and safety arbiter."""
 
     command_type: str
     target: Optional[str] = None
     distance_m: Optional[float] = None
     raw_text: str = ""
+
+
+MetadataValue = Union[float, int, str]
 
 
 @dataclass(frozen=True)
@@ -44,10 +47,8 @@ class NavigationDecision:
     steering_bias: float  # -1.0 (left) .. +1.0 (right)
     desired_speed: float  # meters per second
     hazard_level: float   # 0.0 (clear) .. 1.0 (imminent stop)
-    metadata: Dict[str, float]
+    metadata: Dict[str, MetadataValue]
     enforced_stop: bool = False
-    directive: str = ""
-    caption: str = ""
     goal_context: str = ""
 
 
@@ -61,18 +62,32 @@ class LaneType(str, Enum):
 
 
 @dataclass(frozen=True)
+class LaneEstimate:
+    """Detailed lane-line reconstruction similar to openpilot's planner."""
+
+    lane_type: LaneType
+    confidence: float
+    curvature_m: float
+    lateral_offset_m: float
+    lane_width_m: float
+    recommended_bias: float
+    points_left: Tuple[Tuple[int, int], ...]
+    points_right: Tuple[Tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
 class ContextSnapshot:
-    """Aggregated scene context used by the safety advisor."""
+    """Aggregated scene context used by the safety arbiter."""
 
     lane_type: LaneType
     confidence: float
     sensor_confidence: float
     recommended_bias: float
-    metadata: Dict[str, float] = field(default_factory=dict)
+    metadata: Dict[str, MetadataValue] = field(default_factory=dict)
 
 
-class AdvisorVerdict(str, Enum):
-    """Advisor arbitration outcome."""
+class ArbiterVerdict(str, Enum):
+    """Safety arbiter outcome."""
 
     ALLOW = "ALLOW"
     AMEND = "AMEND"
@@ -80,10 +95,10 @@ class AdvisorVerdict(str, Enum):
 
 
 @dataclass(frozen=True)
-class AdvisorReview:
-    """Advisor output that influences arbitration."""
+class ArbiterReview:
+    """Summary of the safety arbiter evaluation for a control tick."""
 
-    verdict: AdvisorVerdict
+    verdict: ArbiterVerdict
     reason_tags: Tuple[str, ...]
     latency_ms: float
     timestamp: float
@@ -167,7 +182,7 @@ class PilotTickData:
     timestamp: float
     overlay: np.ndarray
     command: ActuatorCommand
-    review: Optional[AdvisorReview]
+    review: Optional[ArbiterReview]
     decision: NavigationDecision
     context: ContextSnapshot
     caps: SafetyCaps
@@ -191,10 +206,3 @@ class PerceptionSummary:
     frame_size: Tuple[int, int]
 
 
-@dataclass(frozen=True)
-class AdvisorDirective:
-    """Advisor feedback used for compliance and operator feedback."""
-
-    directive: str
-    enforced_stop: bool
-    caption: str

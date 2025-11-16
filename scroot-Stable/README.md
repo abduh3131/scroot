@@ -8,9 +8,9 @@ This package contains a self-contained autonomous driving stack tailored for lig
 - Real-time object detection powered by Ultralytics YOLO models (default: `yolov8n.pt`).
 - Hybrid navigation that fuses obstacle density analysis with natural-language operator goals.
 - Safety-aware control layer that outputs normalized actuator commands, brakes for hazards, and honors enforced stops.
-- Optional multimodal advisor (BLIP + FLAN-T5) that captions the scene and issues traffic-law-compliant directives ("use the bike lane", "yield", "slow down").
+- OpenCV-based lane detector with perspective warps, sliding-window fits, and curvature/offset estimates inspired by openpilot’s lateral planner.
 - Command parser that understands phrases such as "drive to the plaza", "drive 2 m forward", or "turn right" and feeds them into the navigator.
-- Structured state export (`logs/command_state.json`, `logs/advisor_state.json`) for telemetry, remote supervision, or UI dashboards.
+- Structured state export (`logs/command_state.json`) for telemetry, remote supervision, or UI dashboards.
 - Modular design that allows future sensors (ultrasonic, LiDAR, depth) to feed into the navigator without architectural changes.
 
 ## Quick Start
@@ -21,7 +21,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
    python setup_scroot.py
    ```
 
-   The script installs all Python dependencies into `.venv/`, caches the default YOLOv8, BLIP, and FLAN checkpoints under `models/`, and prepares runtime directories. Add `--skip-models` if you want to reuse previously downloaded weights.
+   The script installs all Python dependencies into `.venv/`, caches the default YOLOv8 checkpoint under `models/`, and prepares runtime directories. Add `--skip-models` if you want to reuse previously downloaded weights.
 
 2. **Activate the environment** created by the bootstrapper:
 
@@ -37,7 +37,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
    python autonomy_launcher.py --camera 0 --visualize --command "drive 2 m forward"
    ```
 
-   The launcher checks dependencies, starts the camera, runs perception and control, and prints actuator commands together with the advisor verdict:
+   The launcher checks dependencies, starts the camera, runs perception and control, and prints actuator commands together with the arbiter verdict:
 
    ```text
    time=3.42s steer=+0.120 throttle=0.320 brake=0.000 directive="stay in bike lane" goal="drive 2 m forward"
@@ -52,7 +52,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
 | Flag | Purpose |
 | --- | --- |
 | `--venv PATH` | Place the virtual environment in a custom directory (default: `./.venv`). |
-| `--models-dir PATH` | Choose where BLIP/FLAN checkpoints are stored (default: `./models`). |
+| `--models-dir PATH` | Choose where YOLO weights are cached (default: `./models`). |
 | `--skip-models` | Install Python packages but reuse previously downloaded model weights. |
 | `--upgrade` | Recreate the virtual environment from scratch before installing dependencies. |
 
@@ -72,22 +72,19 @@ The launcher accepts several runtime flags:
 | `--log-dir` | Directory for visualizations and state dumps | `logs/` |
 | `--command` | Initial natural-language goal (e.g. `"drive to the park"`) | None |
 | `--command-file` | Path to a UTF-8 text file that can be updated with new commands | None |
-| `--disable-advisor` | Skip loading the multimodal advisor | Enabled |
-| `--advisor-image-model` | Hugging Face name for the BLIP image encoder | `Salesforce/blip-image-captioning-base` |
-| `--advisor-language-model` | Hugging Face name for the language model | `google/flan-t5-small` |
-| `--advisor-device` | Force the device used by the advisor (`cpu`, `cuda`, etc.) | Auto-detect |
-| `--advisor-state` | JSON file capturing the latest advisor directive | `logs/advisor_state.json` |
+| `--lane-sensitivity {precision,balanced,aggressive}` | Tune lane detector smoothing/confidence | `balanced` |
 | `--command-state` | JSON file capturing the parsed command | `logs/command_state.json` |
 
 ## How It Works
 
 1. **CameraSensor** (`autonomy/sensors/camera.py`) continuously streams frames.
 2. **ObjectDetector** (`autonomy/perception/object_detection.py`) identifies obstacles using YOLO and returns bounding boxes.
-3. **CommandInterface** (`autonomy/ai/command_interface.py`) parses operator phrases and exposes structured goals.
-4. **Navigator** (`autonomy/planning/navigator.py`) evaluates obstacle density and the active goal to produce a steering bias, target speed, and goal context.
-5. **SituationalAdvisor** (`autonomy/ai/advisor.py`) captions the scene, blends detection metadata with the goal, and emits a short instruction; it can enforce a full stop for compliance events such as stop signs or pedestrians.
-6. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
-7. **AutonomyPilot** (`autonomy/pilot.py`) orchestrates these components, exports telemetry, and prints raw actuator values for integration with your vehicle controller.
+3. **LaneDetector** (`autonomy/perception/lane_detection.py`) warps the road surface into a bird’s-eye view, runs sliding windows to fit lane lines, and publishes curvature, width, and lateral offset estimates.
+4. **CommandInterface** (`autonomy/ai/command_interface.py`) parses operator phrases and exposes structured goals.
+5. **Navigator** (`autonomy/planning/navigator.py`) blends obstacle density, lane geometry, and the active goal to produce a steering bias, target speed, and goal context.
+6. **Control Arbiter** (`autonomy/control/arbitration.py`) enforces deterministic ALLOW/AMEND/BLOCK decisions based on hazard level, lane confidence, vulnerable road users, and operator caps.
+7. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
+8. **AutonomyPilot** (`autonomy/pilot.py`) orchestrates these components, exports telemetry, and prints raw actuator values for integration with your vehicle controller.
 
 ## Command Interface Tips
 
@@ -98,21 +95,21 @@ The launcher accepts several runtime flags:
   - `turn around`
   - `turn left`
   - `stop`
-- Any unrecognized text is still passed to the advisor so it can reason about free-form goals.
+- Any unrecognized text still reaches the navigator, which treats it as a free-text goal for the arbiter to evaluate.
 
-## Safety Advisor Behavior
+## Safety Arbiter Behavior
 
-The advisor enforces conservative behavior:
+The rule-based arbiter enforces conservative behavior:
 
-- Stops when YOLO detects `stop sign`, `traffic light`, `person`, or `bicycle` directly ahead.
-- Prioritizes sidewalks or bike lanes in its textual guidance.
-- Raises braking priority when the navigator reports a high hazard score (>0.85 by default).
-- Exports human-readable directives and scene captions for auditing.
+- Blocks motion when the predicted time-to-collision drops below the configured threshold or when the vehicle envelope is about to clip a lane boundary.
+- Biases the steering command away from clutter whenever the lane detector reports an offset or low confidence.
+- Applies AMEND decisions that cap throttle around vulnerable road users or when the safety mindset requests lower clearances.
+- Logs every ALLOW/AMEND/BLOCK verdict with explicit reason tags for auditing.
 
 ## Extending the System
 
 - **Additional sensors:** Feed their obstacle cues into `Navigator.plan` by augmenting the occupancy map.
-- **Custom models:** Provide a different YOLO checkpoint via `--model` or swap the advisor models with lighter or heavier variants.
+- **Custom models:** Provide a different YOLO checkpoint via `--model` or tweak the `--lane-sensitivity` flag to match your camera placement and road texture.
 - **Vehicle integration:** Map the normalized actuator outputs to your scooter's control API. For example, scale `steer` to handlebar servo angles and translate `throttle`/`brake` to PWM duty cycles.
 
 ## Safety Notice

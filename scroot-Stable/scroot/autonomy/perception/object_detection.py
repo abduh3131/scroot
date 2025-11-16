@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import cv2
 import numpy as np
@@ -26,7 +26,7 @@ class ObjectDetectorConfig:
 class ObjectDetector:
     """Thin wrapper around the Ultralytics YOLO models."""
 
-    def __init__(self, config: ObjectDetectorConfig | None = None) -> None:
+    def __init__(self, config: Optional[ObjectDetectorConfig] = None) -> None:
         self.config = config or ObjectDetectorConfig()
         self._model = YOLO(self.config.model_name)
         self._model.fuse()
