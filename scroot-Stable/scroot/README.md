@@ -13,6 +13,7 @@ This package contains a self-contained autonomous driving stack tailored for lig
 - Riding companion narration that explains each Advisor decision without blocking the control loop.
 - Optional multimodal VLM companion (BLIP + FLAN-T5) for descriptive captions and free-form directives.
 - Live launch dashboard with camera feed, projected path overlays, throttle/brake gauges, actuator readouts, and advisor chat.
+- Scroll-friendly desktop GUI with Setup, Launch, and Media Test tabs so you can configure hardware, run the live pilot, or upload recorded drives for offline evaluation.
 - Command parser that understands phrases such as "drive to the plaza", "drive 2 m forward", or "turn right" and feeds them into the navigator.
 - Structured telemetry exports (`logs/command_state.json`, `logs/advisor_state.json`, `logs/telemetry.jsonl`, `logs/incidents.jsonl`) for auditing and supervision.
 - Modular design that allows future sensors (ultrasonic, LiDAR, depth) to feed into the navigator without architectural changes.
@@ -41,6 +42,8 @@ This package contains a self-contained autonomous driving stack tailored for lig
    The application now bootstraps itself: it scans your hardware, detects whether you are running native Ubuntu, Ubuntu-on-WSL, or Jetson JetPack, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. If the host Python refuses system-wide installs (PEP 668 “externally managed environment”), the bootstrapper automatically provisions `.venv/` and re-runs the install inside that sandbox so the GUI still opens with a single command. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the Advisor understands real clearance.
 
 3. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. The live feed shows the current frame, projected trajectory lines, throttle/brake gauges, actuator readouts, and color-coded advisor overlay. Use the messaging panel to see what the advisor plans (ALLOW/AMEND/BLOCK) and send natural-language directives back. The launch controls expose Advisor mode (normal/strict), Advisor Model profile (light/normal/heavy), Safety Mindset toggle, Ambient cruising, and Riding Companion persona—tweak them to match the environment before launching.
+
+4. **Use the *Media Test* tab** when you want to sanity-check the AI without riding the scooter. Point it at any road clip (`.mp4`, `.mov`, `.avi`, `.mkv`) or still photo (`.png`, `.jpg`, `.bmp`). The tab reuses your current launch settings, replays the media through the full pilot stack, and writes a new video with the steering vector, throttle/brake bars, lane clearance gauges, directives, and captions burned into every frame. The preview panel streams the most recent overlay so you can watch the run while it renders.
 
 ### Automated environment detection
 
@@ -131,6 +134,10 @@ The launcher accepts several runtime flags:
 5. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
 6. **ControlArbiter** (`autonomy/control/arbitration.py`) fuses the Pilot proposal with the Advisor verdict, Safety Mindset caps, and SafetyGate clamps to publish the final actuator command.
 7. **Riding Companion** (`autonomy/control/companion.py`) narrates each Advisor decision without blocking the loop, while **TelemetryLogger** (`autonomy/control/telemetry.py`) records JSONL logs for auditing.
+
+### Lane detection and openpilot inspiration
+
+The lane detector that drives clearance checks is intentionally simple so it stays portable between Python 3.8+ environments and Jetson boards. Each frame is split into left/center/right buckets. The navigator counts obstacle area in each bucket, estimates free space, and converts the camera calibration into a lane width estimate (`VehicleEnvelope.estimate_lane_width`). This emulates the way openpilot's `lateral_planner.py` reasons about lateral placement—openpilot fits lane-line polynomials and evaluates the free corridor, whereas this scooter pilot uses the bounding-box density plus calibration math to reach the same conclusion. Whenever occupancy grows on one side, the scooter shrinks the clearance value for that side, mirroring openpilot's habit of nudging the planned path away from clutter. Those clearance numbers flow into the advisor (`autonomy/control/arbitration.py`) so AMEND/BLOCK verdicts have explicit tags such as `lane_bias_right`, `lane_too_narrow`, or `unknown_lane`.
 
 ## Command Interface Tips
 
