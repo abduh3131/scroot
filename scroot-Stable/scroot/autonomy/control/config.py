@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Tuple
 
 
-@dataclass(slots=True)
+@dataclass
 class AdvisorRuntimeConfig:
     """Runtime knobs for the rule-based advisor."""
 
@@ -19,16 +19,16 @@ class AdvisorRuntimeConfig:
     timeout_grace_ticks: int = 1
 
 
-@dataclass(slots=True)
+@dataclass
 class ContextConfig:
     """Scene context interpretation parameters."""
 
     enabled: bool = True
-    lane_bias: tuple[str, ...] = ("BIKE_LANE", "ROAD_EDGE", "SIDEWALK")
+    lane_bias: Tuple[str, ...] = ("BIKE_LANE", "ROAD_EDGE", "SIDEWALK")
     min_confidence: float = 0.45
 
 
-@dataclass(slots=True)
+@dataclass
 class NavigationIntentConfig:
     """Settings governing ambient navigation and sub-goals."""
 
@@ -38,7 +38,7 @@ class NavigationIntentConfig:
     meters_stop_tolerance: float = 0.5
 
 
-@dataclass(slots=True)
+@dataclass
 class SafetyMindsetProfile:
     """Profile describing conservative caps for a specific context."""
 
@@ -78,7 +78,7 @@ def _default_uncertainty_bias() -> Dict[str, float]:
     }
 
 
-@dataclass(slots=True)
+@dataclass
 class SafetyMindsetConfig:
     """Toggleable caps applied before arbitration."""
 

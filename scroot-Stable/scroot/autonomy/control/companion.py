@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 from autonomy.utils.data_structures import AdvisorReview
 
@@ -32,7 +32,7 @@ class RidingCompanion:
     min_interval_s: float = 2.0
     _last_ts: float = 0.0
 
-    def narrate(self, review: AdvisorReview) -> str | None:
+    def narrate(self, review: AdvisorReview) -> Optional[str]:
         now = time.time()
         if now - self._last_ts < self.min_interval_s:
             return None
