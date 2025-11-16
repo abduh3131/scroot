@@ -1,12 +1,12 @@
-"""Human-style narration that mirrors advisor decisions."""
+"""Human-style narration that mirrors arbiter decisions."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
-from autonomy.utils.data_structures import AdvisorReview
+from autonomy.utils.data_structures import ArbiterReview
 
 
 PERSONA_TONES: Dict[str, Dict[str, str]] = {
@@ -32,7 +32,7 @@ class RidingCompanion:
     min_interval_s: float = 2.0
     _last_ts: float = 0.0
 
-    def narrate(self, review: AdvisorReview) -> str | None:
+    def narrate(self, review: ArbiterReview) -> Optional[str]:
         now = time.time()
         if now - self._last_ts < self.min_interval_s:
             return None
@@ -41,8 +41,6 @@ class RidingCompanion:
         template = tones.get(review.verdict.value, tones["ALLOW"])
 
         primary_reason = review.reason_tags[0] if review.reason_tags else "nominal"
-        if primary_reason == "advisor_disabled":
-            return None
         message = template.format(reason=primary_reason.replace("_", " "))
 
         self._last_ts = now
