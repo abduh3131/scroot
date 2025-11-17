@@ -14,7 +14,7 @@ from autonomy.utils.data_structures import LaneEstimate, LaneType, VehicleEnvelo
 @dataclass
 class LaneDetectorConfig:
     enabled: bool = True
-    roi_top_ratio: float = 0.58
+    roi_top_ratio: float = 0.64
     min_pixels: int = 500
     smoothing: float = 0.6
     min_confidence: float = 0.35
@@ -23,14 +23,11 @@ class LaneDetectorConfig:
     morph_kernel_px: int = 5
     sobel_kernel: int = 3
     canny_threshold: Tuple[int, int] = (40, 110)
-    auto_roi: bool = True
-    auto_calibrate: bool = True
-    calibration_smoothing: float = 0.65
     src_points: Tuple[Tuple[float, float], ...] = (
-        (0.12, 1.0),
-        (0.88, 1.0),
-        (0.62, 0.62),
-        (0.38, 0.62),
+        (0.10, 1.0),
+        (0.90, 1.0),
+        (0.72, 0.70),
+        (0.28, 0.70),
     )
     dst_points: Tuple[Tuple[float, float], ...] = (
         (0.2, 1.0),
@@ -55,9 +52,6 @@ class LaneDetector:
         self._warp_matrix: Optional[np.ndarray] = None
         self._warp_matrix_inv: Optional[np.ndarray] = None
         self._last_shape: Optional[Tuple[int, int]] = None
-        self._dynamic_src_points: Optional[Tuple[Tuple[float, float], ...]] = None
-        self._dynamic_roi_ratio: Optional[float] = None
-        self._latest_combined_mask: Optional[np.ndarray] = None
 
     def analyze(self, frame: np.ndarray) -> Optional[LaneEstimate]:
         if not self.config.enabled:
@@ -167,42 +161,12 @@ class LaneDetector:
         combined = cv2.bitwise_or(combined, yellow_mask)
         combined = cv2.bitwise_or(combined, canny)
 
-        self._latest_combined_mask = combined
-
-        roi_ratio = self.config.roi_top_ratio
-        if self.config.auto_roi:
-            dynamic_ratio = self._estimate_roi_top_ratio(combined)
-            if dynamic_ratio is not None:
-                roi_ratio = dynamic_ratio
-                self._dynamic_roi_ratio = dynamic_ratio
-            elif self._dynamic_roi_ratio is not None:
-                roi_ratio = self._dynamic_roi_ratio
+        roi_ratio = float(np.clip(self.config.roi_top_ratio, 0.35, 0.8))
 
         mask = np.zeros_like(combined)
         start_row = int(mask.shape[0] * roi_ratio)
         mask[start_row:, :] = combined[start_row:, :]
         return self._refine_mask(mask)
-
-    def _estimate_roi_top_ratio(self, mask: np.ndarray) -> Optional[float]:
-        height = mask.shape[0]
-        if height <= 0:
-            return None
-        profile = np.mean(mask > 0, axis=1)
-        search_start = int(height * 0.35)
-        segment = profile[search_start:]
-        if segment.size == 0:
-            return None
-        indices = np.where(segment > 0.05)[0]
-        if indices.size == 0:
-            return None
-        first_idx = int(indices[0]) + search_start
-        ratio = float(np.clip(first_idx / max(height, 1), 0.3, 0.8))
-        if self._dynamic_roi_ratio is not None:
-            ratio = float(
-                self.config.calibration_smoothing * self._dynamic_roi_ratio
-                + (1.0 - self.config.calibration_smoothing) * ratio
-            )
-        return ratio
 
     def _refine_mask(self, mask: np.ndarray) -> np.ndarray:
         kernel_size = max(3, int(self.config.morph_kernel_px) // 2 * 2 + 1)
@@ -213,9 +177,7 @@ class LaneDetector:
 
     def _warp(self, binary: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         height, width = binary.shape
-        calibration_mask = self._latest_combined_mask if self._latest_combined_mask is not None else binary
-        calibration_changed = self._auto_calibrate_warp(calibration_mask)
-        if self._last_shape != (height, width) or calibration_changed:
+        if self._last_shape != (height, width):
             self._compute_warp_matrices(width, height)
             self._last_shape = (height, width)
 
@@ -231,8 +193,7 @@ class LaneDetector:
         return warped, self._warp_matrix_inv
 
     def _compute_warp_matrices(self, width: int, height: int) -> None:
-        source_points = self._dynamic_src_points or self.config.src_points
-        src = self._scale_points(source_points, width, height)
+        src = self._scale_points(self.config.src_points, width, height)
         dst = self._scale_points(self.config.dst_points, width, height)
         self._warp_matrix = cv2.getPerspectiveTransform(src, dst)
         self._warp_matrix_inv = cv2.getPerspectiveTransform(dst, src)
@@ -309,92 +270,6 @@ class LaneDetector:
         left_fit = np.polyfit(lefty, leftx, 2)
         right_fit = np.polyfit(righty, rightx, 2)
         return left_fit, right_fit, nonzerox, nonzeroy, left_inds, right_inds
-
-    def _auto_calibrate_warp(self, mask: np.ndarray) -> bool:
-        if not self.config.auto_calibrate or mask.size == 0:
-            return False
-
-        edges = cv2.Canny(mask, 40, 150)
-        lines = cv2.HoughLinesP(
-            edges,
-            rho=1,
-            theta=np.pi / 180,
-            threshold=60,
-            minLineLength=max(40, mask.shape[0] // 3),
-            maxLineGap=40,
-        )
-        if lines is None:
-            return False
-
-        left_lines: list[Tuple[float, float]] = []
-        right_lines: list[Tuple[float, float]] = []
-        for x1, y1, x2, y2 in lines[:, 0, :]:
-            if x2 == x1:
-                continue
-            slope = (y2 - y1) / (x2 - x1)
-            if abs(slope) < 0.2:
-                continue
-            intercept = y1 - slope * x1
-            if slope < 0:
-                left_lines.append((slope, intercept))
-            else:
-                right_lines.append((slope, intercept))
-
-        if not left_lines or not right_lines:
-            return False
-
-        left_m, left_b = np.mean(left_lines, axis=0)
-        right_m, right_b = np.mean(right_lines, axis=0)
-
-        height, width = mask.shape
-        bottom_y = height - 1
-        top_y = int(height * 0.55)
-
-        def x_at_y(m: float, b: float, y_val: float) -> Optional[float]:
-            if abs(m) < 1e-3:
-                return None
-            return (y_val - b) / m
-
-        left_bottom = x_at_y(left_m, left_b, bottom_y)
-        right_bottom = x_at_y(right_m, right_b, bottom_y)
-        left_top = x_at_y(left_m, left_b, top_y)
-        right_top = x_at_y(right_m, right_b, top_y)
-
-        if None in (left_bottom, right_bottom, left_top, right_top):
-            return False
-
-        def clamp_norm(x: float) -> float:
-            return float(np.clip(x / max(width - 1, 1), 0.05, 0.95))
-
-        new_points: Tuple[Tuple[float, float], ...] = (
-            (clamp_norm(left_bottom), 1.0),
-            (clamp_norm(right_bottom), 1.0),
-            (clamp_norm(right_top), float(np.clip(top_y / max(height - 1, 1), 0.3, 0.9))),
-            (clamp_norm(left_top), float(np.clip(top_y / max(height - 1, 1), 0.3, 0.9))),
-        )
-
-        smoothing = float(np.clip(self.config.calibration_smoothing, 0.0, 0.95))
-        blended_points = new_points
-        if self._dynamic_src_points is not None:
-            blended_points = tuple(
-                (
-                    old_pt[0] * smoothing + new_pt[0] * (1.0 - smoothing),
-                    old_pt[1] * smoothing + new_pt[1] * (1.0 - smoothing),
-                )
-                for old_pt, new_pt in zip(self._dynamic_src_points, new_points)
-            )
-
-        if self._dynamic_src_points is None:
-            self._dynamic_src_points = blended_points
-            return True
-
-        old = np.array(self._dynamic_src_points)
-        updated = np.array(blended_points)
-        if np.max(np.abs(old - updated)) < 1e-3:
-            return False
-
-        self._dynamic_src_points = tuple(map(tuple, updated.tolist()))
-        return True
 
     def _smooth_fits(self, left_fit: np.ndarray, right_fit: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         alpha = max(0.0, min(1.0, self.config.smoothing))
