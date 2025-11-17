@@ -9,14 +9,14 @@ from autonomy.control.config import ContextConfig, NavigationIntentConfig
 from autonomy.utils.data_structures import ContextSnapshot, LaneType, NavigationDecision
 
 
-@dataclass(slots=True)
+@dataclass
 class SceneContext:
     snapshot: ContextSnapshot
     subgoal_hint: Optional[str]
 
 
 class ContextAnalyzer:
-    """Derives semantic lane and confidence cues for the advisor."""
+    """Derives semantic lane and confidence cues for the arbiter."""
 
     def __init__(self, config: ContextConfig, intent_config: NavigationIntentConfig) -> None:
         self.config = config
