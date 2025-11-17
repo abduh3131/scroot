@@ -1,4 +1,4 @@
-"""Advisor arbitration pipeline implementation."""
+"""Safety arbiter pipeline implementation."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ import time
 from dataclasses import dataclass, replace
 from typing import Iterable, Optional, Tuple
 
-from autonomy.control.config import AdvisorRuntimeConfig, ContextConfig, NavigationIntentConfig
+from autonomy.control.config import ArbiterRuntimeConfig, ContextConfig, NavigationIntentConfig
 from autonomy.utils.data_structures import (
     ActuatorCommand,
-    AdvisorReview,
-    AdvisorVerdict,
+    ArbiterReview,
+    ArbiterVerdict,
     ContextSnapshot,
     LaneType,
     NavigationDecision,
@@ -29,12 +29,12 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-class RuleBasedAdvisor:
-    """Deterministic advisor producing ALLOW/AMEND/BLOCK directives."""
+class SafetyArbiter:
+    """Deterministic safety arbiter producing ALLOW/AMEND/BLOCK directives."""
 
     def __init__(
         self,
-        config: AdvisorRuntimeConfig,
+        config: ArbiterRuntimeConfig,
         max_vehicle_speed_mps: float,
         vehicle: Optional[VehicleEnvelope] = None,
     ) -> None:
@@ -51,10 +51,10 @@ class RuleBasedAdvisor:
         context: ContextSnapshot,
         caps: SafetyCaps,
         has_goal: bool,
-    ) -> AdvisorReview:
+    ) -> ArbiterReview:
         start = time.perf_counter()
         reason_tags: list[str] = []
-        verdict = AdvisorVerdict.ALLOW
+        verdict = ArbiterVerdict.ALLOW
         amended: Optional[ActuatorCommand] = None
 
         hazard = decision.hazard_level
@@ -83,34 +83,34 @@ class RuleBasedAdvisor:
 
         # Collision blocks -------------------------------------------------
         if ttc is not None and ttc <= self.config.ttc_block_s:
-            verdict = AdvisorVerdict.BLOCK
+            verdict = ArbiterVerdict.BLOCK
             reason_tags.append("ttc_low")
 
         if hazard >= 0.9:
-            verdict = AdvisorVerdict.BLOCK
+            verdict = ArbiterVerdict.BLOCK
             reason_tags.append("hazard_peak")
 
         if sensor_conf < 0.3 and desired_speed > 0.5:
-            verdict = AdvisorVerdict.BLOCK
+            verdict = ArbiterVerdict.BLOCK
             reason_tags.append("sensor_degradation")
 
         if self._vehicle:
             required_forward = self._vehicle.required_forward_clearance()
             if nearest_distance < required_forward:
-                verdict = AdvisorVerdict.BLOCK
+                verdict = ArbiterVerdict.BLOCK
                 reason_tags.append("forward_clearance")
 
             if lane_width and lane_width < self._vehicle.width_m + 2.0 * self._vehicle.clearance_margin_m:
-                verdict = AdvisorVerdict.BLOCK
+                verdict = ArbiterVerdict.BLOCK
                 reason_tags.append("lane_too_narrow")
 
             min_side_clearance = min(clearance_left, clearance_right)
             if min_side_clearance < required_lateral:
-                verdict = AdvisorVerdict.BLOCK
+                verdict = ArbiterVerdict.BLOCK
                 reason_tags.append("envelope_violation")
 
-        if detection_counts.get("person", 0) > 0 and desired_speed > 2.5 and verdict != AdvisorVerdict.BLOCK:
-            verdict = AdvisorVerdict.AMEND
+        if detection_counts.get("person", 0) > 0 and desired_speed > 2.5 and verdict != ArbiterVerdict.BLOCK:
+            verdict = ArbiterVerdict.AMEND
             amended = ActuatorCommand(
                 steer=proposed.steer,
                 throttle=min(proposed.throttle, _speed_to_throttle(self.config.amend_speed_cap_mps)),
@@ -119,14 +119,14 @@ class RuleBasedAdvisor:
             reason_tags.append("pedestrian_close")
 
         if context.lane_type == LaneType.SIDEWALK and meta.get("intended_context") == "road":
-            verdict = AdvisorVerdict.BLOCK
+            verdict = ArbiterVerdict.BLOCK
             reason_tags.append("lane_mismatch")
 
-        if verdict == AdvisorVerdict.BLOCK and not reason_tags:
+        if verdict == ArbiterVerdict.BLOCK and not reason_tags:
             reason_tags.append("blocking")
 
         # Amendments -------------------------------------------------------
-        if verdict != AdvisorVerdict.BLOCK:
+        if verdict != ArbiterVerdict.BLOCK:
             amended = None
             # Speed caps based on mindset/context
             if caps.active and desired_speed > caps.max_speed_mps + 1e-3:
@@ -136,12 +136,12 @@ class RuleBasedAdvisor:
                     throttle=_speed_to_throttle(target_speed),
                     brake=max(proposed.brake, 0.1),
                 )
-                verdict = AdvisorVerdict.AMEND
+                verdict = ArbiterVerdict.AMEND
                 reason_tags.append("cap_speed")
 
             vulnerable_distance = float(meta.get("nearest_vru_distance_m", math.inf))
             if (
-                verdict != AdvisorVerdict.BLOCK
+                verdict != ArbiterVerdict.BLOCK
                 and vulnerable_distance < math.inf
                 and vulnerable_distance < max(2.5, desired_speed * 1.2)
             ):
@@ -150,16 +150,16 @@ class RuleBasedAdvisor:
                     throttle=min(proposed.throttle, _speed_to_throttle(self.config.amend_speed_cap_mps)),
                     brake=max(proposed.brake, 0.25),
                 )
-                verdict = AdvisorVerdict.AMEND
+                verdict = ArbiterVerdict.AMEND
                 reason_tags.append("vru_slow")
 
             if (
-                verdict != AdvisorVerdict.BLOCK
+                verdict != ArbiterVerdict.BLOCK
                 and lane_conf < self.config.min_conf_for_allow
                 and desired_speed > 0.4
             ):
                 if self.config.mode == "strict":
-                    verdict = AdvisorVerdict.BLOCK
+                    verdict = ArbiterVerdict.BLOCK
                     amended = None
                     reason_tags.append("unknown_lane")
                 else:
@@ -168,12 +168,12 @@ class RuleBasedAdvisor:
                         throttle=min(proposed.throttle, _speed_to_throttle(self.config.amend_speed_cap_mps)),
                         brake=max(proposed.brake, 0.2),
                     )
-                    verdict = AdvisorVerdict.AMEND
+                    verdict = ArbiterVerdict.AMEND
                     reason_tags.append("unknown_lane")
 
             bike_lane_offset = meta.get("bike_lane_offset")
             if (
-                verdict != AdvisorVerdict.BLOCK
+                verdict != ArbiterVerdict.BLOCK
                 and bike_lane_offset is not None
                 and float(bike_lane_offset) > 0.1
             ):
@@ -182,11 +182,11 @@ class RuleBasedAdvisor:
                     throttle=min(proposed.throttle, _speed_to_throttle(self.config.amend_speed_cap_mps)),
                     brake=proposed.brake,
                 )
-                verdict = AdvisorVerdict.AMEND
+                verdict = ArbiterVerdict.AMEND
                 reason_tags.append("lane_bias_right")
 
             if (
-                verdict != AdvisorVerdict.BLOCK
+                verdict != ArbiterVerdict.BLOCK
                 and not has_goal
                 and caps.active
                 and caps.max_speed_mps < 1.0
@@ -196,7 +196,7 @@ class RuleBasedAdvisor:
                     throttle=min(proposed.throttle, _speed_to_throttle(1.0)),
                     brake=max(proposed.brake, 0.3),
                 )
-                verdict = AdvisorVerdict.AMEND
+                verdict = ArbiterVerdict.AMEND
                 reason_tags.append("ambient_crawl")
 
             if self._vehicle:
@@ -211,16 +211,16 @@ class RuleBasedAdvisor:
                         ),
                         brake=max(proposed.brake, 0.25),
                     )
-                    verdict = AdvisorVerdict.AMEND
+                    verdict = ArbiterVerdict.AMEND
                     reason_tags.append("side_clearance_bias")
 
         if not reason_tags:
             reason_tags.append("nominal")
 
         latency_ms = (time.perf_counter() - start) * 1000.0
-        safe_to_release = verdict != AdvisorVerdict.BLOCK and hazard < 0.35 and (ttc is None or ttc > self.config.ttc_block_s * 1.5)
+        safe_to_release = verdict != ArbiterVerdict.BLOCK and hazard < 0.35 and (ttc is None or ttc > self.config.ttc_block_s * 1.5)
 
-        return AdvisorReview(
+        return ArbiterReview(
             verdict=verdict,
             reason_tags=tuple(dict.fromkeys(reason_tags)),
             latency_ms=latency_ms,
@@ -230,7 +230,7 @@ class RuleBasedAdvisor:
         )
 
 
-@dataclass(slots=True)
+@dataclass
 class NavigationIntentManager:
     """Tracks temporary navigation sub-goals."""
 
@@ -293,7 +293,7 @@ class SafetyGate:
         tags: list[str] = []
 
         if block_active:
-            tags.append("advisor_block")
+            tags.append("arbiter_block")
             return _fail_stop(), tuple(tags)
 
         steer, throttle, brake = base_command.steer, base_command.throttle, base_command.brake
@@ -352,30 +352,28 @@ class SafetyGate:
 
 @dataclass
 class ArbitrationResult:
-    review: AdvisorReview
+    review: ArbiterReview
     final_command: ActuatorCommand
     gate_tags: Tuple[str, ...]
     subgoal: NavigationSubGoal
 
 
 class ControlArbiter:
-    """Coordinates advisor, safety gate, and logging semantics."""
+    """Coordinates the safety arbiter, gate, and logging semantics."""
 
     def __init__(
         self,
-        advisor_config: AdvisorRuntimeConfig,
+        arbiter_config: ArbiterRuntimeConfig,
         context_config: ContextConfig,
         intent_config: NavigationIntentConfig,
         max_vehicle_speed: float,
         vehicle: Optional[VehicleEnvelope] = None,
-        enabled: bool = True,
     ) -> None:
-        self._advisor = RuleBasedAdvisor(advisor_config, max_vehicle_speed, vehicle)
+        self._arbiter = SafetyArbiter(arbiter_config, max_vehicle_speed, vehicle)
         self._gate = SafetyGate(max_vehicle_speed, context_config, intent_config, vehicle)
         self._intent = NavigationIntentManager(intent_config)
-        self._advisor_config = advisor_config
-        self._enabled = enabled
-        self._last_review: Optional[AdvisorReview] = None
+        self._arbiter_config = arbiter_config
+        self._last_review: Optional[ArbiterReview] = None
         self._timeout_streak = 0
         self._block_active = False
         self._block_release_candidate: Optional[float] = None
@@ -392,34 +390,7 @@ class ControlArbiter:
         ambient_mode: bool,
         subgoal_hint: Optional[str],
     ) -> ArbitrationResult:
-        if not self._enabled:
-            review = AdvisorReview(
-                verdict=AdvisorVerdict.ALLOW,
-                reason_tags=("advisor_disabled",),
-                latency_ms=0.0,
-                timestamp=timestamp,
-                amended_command=None,
-                safe_to_release=True,
-            )
-            final_command, gate_tags = self._gate.apply(
-                proposed,
-                decision,
-                context,
-                caps,
-                block_active=False,
-                ambient_mode=ambient_mode,
-                has_goal=has_goal,
-            )
-            subgoal = self._intent.update(timestamp, context, subgoal_hint)
-            self._last_review = review
-            return ArbitrationResult(
-                review=review,
-                final_command=final_command,
-                gate_tags=gate_tags,
-                subgoal=subgoal,
-            )
-
-        review = self._advisor.evaluate(
+        review = self._arbiter.evaluate(
             timestamp,
             perception_objects,
             decision,
@@ -429,9 +400,9 @@ class ControlArbiter:
             has_goal,
         )
 
-        if review.latency_ms > self._advisor_config.evaluation_budget_ms:
+        if review.latency_ms > self._arbiter_config.evaluation_budget_ms:
             self._timeout_streak += 1
-            if self._timeout_streak <= max(0, self._advisor_config.timeout_grace_ticks) and self._last_review:
+            if self._timeout_streak <= max(0, self._arbiter_config.timeout_grace_ticks) and self._last_review:
                 review = replace(
                     self._last_review,
                     latency_ms=review.latency_ms,
@@ -439,8 +410,8 @@ class ControlArbiter:
                     reason_tags=tuple(dict.fromkeys(self._last_review.reason_tags + ("timeout",))),
                 )
             else:
-                review = AdvisorReview(
-                    verdict=AdvisorVerdict.BLOCK,
+                review = ArbiterReview(
+                    verdict=ArbiterVerdict.BLOCK,
                     reason_tags=("timeout",),
                     latency_ms=review.latency_ms,
                     timestamp=timestamp,
@@ -450,20 +421,20 @@ class ControlArbiter:
         else:
             self._timeout_streak = 0
 
-        if review.verdict == AdvisorVerdict.BLOCK:
+        if review.verdict == ArbiterVerdict.BLOCK:
             self._block_active = True
             self._block_release_candidate = None
         elif self._block_active:
             if review.safe_to_release:
                 if self._block_release_candidate is None:
                     self._block_release_candidate = timestamp
-                elif (timestamp - self._block_release_candidate) * 1000.0 >= self._advisor_config.block_debounce_ms:
+                elif (timestamp - self._block_release_candidate) * 1000.0 >= self._arbiter_config.block_debounce_ms:
                     self._block_active = False
                     self._block_release_candidate = None
             else:
                 review = replace(
                     review,
-                    verdict=AdvisorVerdict.BLOCK,
+                    verdict=ArbiterVerdict.BLOCK,
                     amended_command=None,
                     reason_tags=tuple(dict.fromkeys(review.reason_tags + ("block_hold",))),
                     safe_to_release=False,
@@ -472,9 +443,9 @@ class ControlArbiter:
         self._last_review = review
 
         base_command = proposed
-        if review.verdict == AdvisorVerdict.AMEND and review.amended_command is not None:
+        if review.verdict == ArbiterVerdict.AMEND and review.amended_command is not None:
             base_command = review.amended_command
-        if review.verdict == AdvisorVerdict.BLOCK:
+        if review.verdict == ArbiterVerdict.BLOCK:
             base_command = _fail_stop()
 
         final_command, gate_tags = self._gate.apply(
@@ -482,7 +453,7 @@ class ControlArbiter:
             decision,
             context,
             caps,
-            block_active=self._block_active or review.verdict == AdvisorVerdict.BLOCK,
+            block_active=self._block_active or review.verdict == ArbiterVerdict.BLOCK,
             ambient_mode=ambient_mode,
             has_goal=has_goal,
         )
