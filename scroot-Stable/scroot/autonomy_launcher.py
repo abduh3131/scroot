@@ -8,7 +8,6 @@ REQUIRED_PACKAGES = [
     "cv2",
     "ultralytics",
     "torch",
-    "transformers",
 ]
 
 

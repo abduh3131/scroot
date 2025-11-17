@@ -8,17 +8,16 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, Union
 
 import cv2
 import numpy as np
 
-from autonomy.ai.advisor import AdvisorConfig, SituationalAdvisor
 from autonomy.ai.command_interface import CommandInterface
 from autonomy.control.arbitration import ControlArbiter
 from autonomy.control.companion import RidingCompanion
 from autonomy.control.config import (
-    AdvisorRuntimeConfig,
+    ArbiterRuntimeConfig,
     ContextConfig,
     NavigationIntentConfig,
     SafetyMindsetConfig,
@@ -27,16 +26,17 @@ from autonomy.control.context import ContextAnalyzer
 from autonomy.control.controller import Controller, ControllerConfig
 from autonomy.control.mindset import SafetyMindset
 from autonomy.control.telemetry import TelemetryLogger
+from autonomy.perception.lane_detection import LaneDetector, LaneDetectorConfig
 from autonomy.perception.object_detection import ObjectDetector, ObjectDetectorConfig
 from autonomy.planning.navigator import Navigator, NavigatorConfig
 from autonomy.sensors.camera import CameraSensor
 from autonomy.utils.data_structures import (
     ActuatorCommand,
-    AdvisorDirective,
-    AdvisorReview,
-    AdvisorVerdict,
+    ArbiterReview,
+    ArbiterVerdict,
     ContextSnapshot,
     HighLevelCommand,
+    LaneEstimate,
     NavigationDecision,
     NavigationSubGoal,
     PerceptionSummary,
@@ -48,7 +48,7 @@ from autonomy.utils.data_structures import (
 
 @dataclass
 class PilotConfig:
-    camera_source: int | str = 0
+    camera_source: Union[int, str] = 0
     camera_width: int = 1280
     camera_height: int = 720
     camera_fps: int = 30
@@ -57,20 +57,17 @@ class PilotConfig:
     iou_threshold: float = 0.4
     visualize: bool = False
     log_dir: Path = Path("logs")
-    advisor_enabled: bool = True
-    advisor_image_model: str = "Salesforce/blip-image-captioning-base"
-    advisor_language_model: str = "google/flan-t5-small"
-    advisor_device: Optional[str] = None
-    advisor_state_path: Optional[Path] = Path("logs/advisor_state.json")
     command_state_path: Optional[Path] = Path("logs/command_state.json")
     initial_command: Optional[str] = None
     command_file: Optional[Path] = None
-    advisor: AdvisorRuntimeConfig = field(default_factory=AdvisorRuntimeConfig)
+    arbiter: ArbiterRuntimeConfig = field(default_factory=ArbiterRuntimeConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     navigation_intent: NavigationIntentConfig = field(default_factory=NavigationIntentConfig)
     safety_mindset: SafetyMindsetConfig = field(default_factory=SafetyMindsetConfig)
     safety_mindset_enabled: bool = False
     companion_persona: str = "calm_safe"
+    lane_detector: LaneDetectorConfig = field(default_factory=LaneDetectorConfig)
+    detector_device: str = "auto"
     vehicle_description: str = "Scooter"
     vehicle_width_m: float = 0.65
     vehicle_length_m: float = 1.2
@@ -78,6 +75,7 @@ class PilotConfig:
     vehicle_clearance_margin_m: float = 0.2
     calibration_reference_distance_m: float = 2.0
     calibration_reference_pixels: float = 220.0
+    companion_enabled: bool = True
 
 
 class AutonomyPilot:
@@ -85,7 +83,7 @@ class AutonomyPilot:
 
     def __init__(
         self,
-        config: PilotConfig | None = None,
+        config: Optional[PilotConfig] = None,
         tick_callback: Optional[Callable[[PilotTickData], None]] = None,
     ) -> None:
         self.config = config or PilotConfig()
@@ -111,19 +109,13 @@ class AutonomyPilot:
                 model_name=self.config.model_name,
                 confidence_threshold=self.config.confidence_threshold,
                 iou_threshold=self.config.iou_threshold,
+                device=self.config.detector_device,
             )
         )
         self._navigator = Navigator(NavigatorConfig(), vehicle=self._vehicle)
         self._controller_config = ControllerConfig()
         self._controller = Controller(self._controller_config)
-        self._advisor = None
-        if self.config.advisor_enabled:
-            advisor_config = AdvisorConfig(
-                image_model=self.config.advisor_image_model,
-                language_model=self.config.advisor_language_model,
-                device=self.config.advisor_device,
-            )
-            self._advisor = SituationalAdvisor(advisor_config)
+        self._lane_detector = LaneDetector(vehicle=self._vehicle, config=self.config.lane_detector)
 
         self._command_interface = CommandInterface(
             command_file=self.config.command_file,
@@ -131,14 +123,14 @@ class AutonomyPilot:
         )
         self._running = False
         self._latest_decision: Optional[NavigationDecision] = None
-        self._latest_directive: Optional[AdvisorDirective] = None
-        self._latest_review: Optional[AdvisorReview] = None
+        self._latest_review: Optional[ArbiterReview] = None
         self._latest_context: Optional[ContextSnapshot] = None
         self._latest_caps: Optional[SafetyCaps] = None
         self._latest_subgoal: Optional[NavigationSubGoal] = None
         self._latest_companion: Optional[str] = None
+        self._latest_lane: Optional[LaneEstimate] = None
 
-        if self.config.visualize or self.config.advisor_state_path or self.config.command_state_path:
+        if self.config.visualize or self.config.command_state_path:
             self.config.log_dir.mkdir(parents=True, exist_ok=True)
 
         # Safety mindset toggle
@@ -148,26 +140,25 @@ class AutonomyPilot:
         self._context_analyzer = ContextAnalyzer(self.config.context, self.config.navigation_intent)
         self._mindset = SafetyMindset(self.config.safety_mindset, vehicle=self._vehicle)
         self._arbiter = ControlArbiter(
-            advisor_config=self.config.advisor,
+            arbiter_config=self.config.arbiter,
             context_config=self.config.context,
             intent_config=self.config.navigation_intent,
             max_vehicle_speed=self._controller_config.max_speed_mps,
             vehicle=self._vehicle,
-            enabled=self.config.advisor_enabled,
         )
         self._telemetry = TelemetryLogger(self.config.log_dir)
-        self._companion = RidingCompanion(persona=self.config.companion_persona)
+        self._companion = (
+            RidingCompanion(persona=self.config.companion_persona)
+            if self.config.companion_enabled
+            else None
+        )
 
     @property
     def latest_decision(self) -> Optional[NavigationDecision]:
         return self._latest_decision
 
     @property
-    def latest_directive(self) -> Optional[AdvisorDirective]:
-        return self._latest_directive
-
-    @property
-    def latest_review(self) -> Optional[AdvisorReview]:
+    def latest_review(self) -> Optional[ArbiterReview]:
         return self._latest_review
 
     @property
@@ -186,6 +177,10 @@ class AutonomyPilot:
     def latest_companion(self) -> Optional[str]:
         return self._latest_companion
 
+    @property
+    def latest_lane(self) -> Optional[LaneEstimate]:
+        return self._latest_lane
+
     def run(self) -> Iterator[ActuatorCommand]:
         logging.info("Starting autonomous pilot loop")
         self._running = True
@@ -201,23 +196,19 @@ class AutonomyPilot:
             if self._command_interface:
                 current_command = self._command_interface.poll()
 
+            lane_estimate = self._lane_detector.analyze(frame)
+            self._latest_lane = lane_estimate
+
             perception_summary = self._detector.detect(frame)
-            decision = self._navigator.plan(perception_summary.objects, perception_summary.frame_size, current_command)
+            decision = self._navigator.plan(
+                perception_summary.objects,
+                perception_summary.frame_size,
+                current_command,
+                lane_estimate=lane_estimate,
+            )
 
             if current_command and current_command.command_type == "stop":
                 decision = replace(decision, desired_speed=0.0, hazard_level=1.0, enforced_stop=True)
-
-            advisor_directive: Optional[AdvisorDirective] = None
-            if self._advisor:
-                advisor_directive = self._advisor.analyze(frame, perception_summary, decision, current_command)
-                decision = replace(
-                    decision,
-                    enforced_stop=decision.enforced_stop or advisor_directive.enforced_stop,
-                    directive=advisor_directive.directive,
-                    caption=advisor_directive.caption,
-                )
-                if advisor_directive.enforced_stop:
-                    decision = replace(decision, desired_speed=0.0, hazard_level=1.0)
 
             proposed_command = self._controller.command(decision)
 
@@ -241,7 +232,11 @@ class AutonomyPilot:
 
             command = arbitration.final_command
             review = arbitration.review
-            companion_message = self._companion.narrate(review)
+            companion_message = ""
+            if self._companion and review:
+                narrated = self._companion.narrate(review)
+                if narrated:
+                    companion_message = narrated
 
             self._telemetry.record(
                 timestamp=tick_time,
@@ -257,12 +252,11 @@ class AutonomyPilot:
             )
 
             self._latest_decision = decision
-            self._latest_directive = advisor_directive
             self._latest_review = review
             self._latest_context = scene_context.snapshot
             self._latest_caps = caps
             self._latest_subgoal = arbitration.subgoal
-            self._latest_companion = companion_message
+            self._latest_companion = companion_message or None
 
             overlay_frame = None
             if self._tick_callback or self.config.visualize:
@@ -273,6 +267,7 @@ class AutonomyPilot:
                     command,
                     arbitration,
                     caps,
+                    lane_estimate,
                 )
 
             if self._tick_callback and overlay_frame is not None:
@@ -291,7 +286,7 @@ class AutonomyPilot:
             if self.config.visualize and overlay_frame is not None:
                 self._visualize(overlay_frame)
 
-            self._export_state(current_command, advisor_directive, decision)
+            self._export_command_state(current_command)
 
             yield command
 
@@ -301,25 +296,12 @@ class AutonomyPilot:
     def stop(self) -> None:
         self._running = False
 
-    def _export_state(
+    def _export_command_state(
         self,
         current_command: Optional[HighLevelCommand],
-        advisor_directive: Optional[AdvisorDirective],
-        decision: NavigationDecision,
     ) -> None:
         if self._command_interface and self.config.command_state_path:
             self._command_interface.export_state(self.config.command_state_path)
-
-        if advisor_directive and self.config.advisor_state_path:
-            payload = {
-                "directive": advisor_directive.directive,
-                "enforced_stop": advisor_directive.enforced_stop,
-                "caption": advisor_directive.caption,
-                "goal_context": decision.goal_context,
-            }
-            path = self.config.advisor_state_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _compose_overlay(
         self,
@@ -329,6 +311,7 @@ class AutonomyPilot:
         command: ActuatorCommand,
         arbitration,
         caps: SafetyCaps,
+        lane_estimate: Optional[LaneEstimate],
     ) -> np.ndarray:
         overlay = frame.copy()
         overlay = self._detector.draw_detections(overlay, perception.objects)
@@ -402,12 +385,25 @@ class AutonomyPilot:
             1,
         )
 
+        if lane_estimate:
+            if lane_estimate.points_left:
+                cv2.polylines(overlay, [np.array(lane_estimate.points_left)], False, (255, 215, 0), 3)
+            if lane_estimate.points_right:
+                cv2.polylines(overlay, [np.array(lane_estimate.points_right)], False, (0, 191, 255), 3)
+            center_path = []
+            for left_pt, right_pt in zip(lane_estimate.points_left, lane_estimate.points_right):
+                cx = int((left_pt[0] + right_pt[0]) / 2)
+                cy = int((left_pt[1] + right_pt[1]) / 2)
+                center_path.append((cx, cy))
+            if center_path:
+                cv2.polylines(overlay, [np.array(center_path)], False, (102, 255, 102), 2)
+
         review = getattr(arbitration, "review", None)
         if review:
             color_map = {
-                AdvisorVerdict.ALLOW: (60, 160, 60),
-                AdvisorVerdict.AMEND: (0, 165, 255),
-                AdvisorVerdict.BLOCK: (0, 0, 255),
+                ArbiterVerdict.ALLOW: (60, 160, 60),
+                ArbiterVerdict.AMEND: (0, 165, 255),
+                ArbiterVerdict.BLOCK: (0, 0, 255),
             }
             header = overlay.copy()
             cv2.rectangle(header, (0, 0), (width, 70), color_map.get(review.verdict, (90, 90, 90)), -1)
@@ -437,14 +433,18 @@ class AutonomyPilot:
             f"Throttle {command.throttle:.2f} Brake {command.brake:.2f}",
             f"Desired {decision.desired_speed:.1f} m/s",
         ]
-        if decision.directive:
-            info_lines.append(f"Directive {decision.directive}")
         if decision.goal_context:
             info_lines.append(f"Goal {decision.goal_context}")
         if caps and caps.active:
             info_lines.append(
                 f"Caps {caps.source}: ≤{caps.max_speed_mps:.1f}m/s, ≥{caps.min_clearance_m:.1f}m"
             )
+        if lane_estimate:
+            info_lines.append(
+                f"Lane {lane_estimate.lane_type} conf={lane_estimate.confidence:.2f} off={lane_estimate.lateral_offset_m:+.2f}m"
+            )
+            if lane_estimate.curvature_m:
+                info_lines.append(f"Curvature ~{lane_estimate.curvature_m:.0f} m")
         gate_tags = getattr(arbitration, "gate_tags", ())
         if gate_tags:
             info_lines.append("Gate " + ", ".join(gate_tags))
@@ -473,7 +473,7 @@ class AutonomyPilot:
         timestamp: float,
         overlay: np.ndarray,
         command: ActuatorCommand,
-        review: AdvisorReview,
+        review: ArbiterReview,
         decision: NavigationDecision,
         context: ContextSnapshot,
         caps: SafetyCaps,
@@ -533,8 +533,14 @@ def run_pilot(config: PilotConfig) -> None:
         for command in pilot.run():
             elapsed = time.time() - start_time
             decision = pilot.latest_decision
-            directive = decision.directive if decision else ""
             goal_context = decision.goal_context if decision else ""
+            lane_conf = ""
+            if decision:
+                meta = decision.metadata
+                conf = meta.get("lane_confidence") if isinstance(meta, dict) else None
+                offset = meta.get("lane_offset_m") if isinstance(meta, dict) else None
+                if isinstance(conf, (float, int)) and isinstance(offset, (float, int)):
+                    lane_conf = f" lane={float(conf):.2f} offset={float(offset):+.2f}m"
             print(
                 " ".join(
                     [
@@ -542,10 +548,10 @@ def run_pilot(config: PilotConfig) -> None:
                         f"steer={command.steer:+.3f}",
                         f"throttle={command.throttle:.3f}",
                         f"brake={command.brake:.3f}",
-                        f"directive=\"{directive}\"",
                         f"goal=\"{goal_context}\"",
                     ]
-                ),
+                )
+                + lane_conf,
                 flush=True,
             )
 
@@ -563,19 +569,33 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
     parser.add_argument("--model", default="yolov8n.pt")
     parser.add_argument("--confidence", type=float, default=0.3)
     parser.add_argument("--iou", type=float, default=0.4)
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda", "quadro_p520"],
+        default="auto",
+        help=(
+            "Choose inference acceleration: auto-detect, force CPU, force CUDA, or use the Quadro P520 compatibility mode."
+        ),
+    )
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--log-dir", default="logs")
-    parser.add_argument("--disable-advisor", action="store_true")
-    parser.add_argument("--advisor-image-model", default="Salesforce/blip-image-captioning-base")
-    parser.add_argument("--advisor-language-model", default="google/flan-t5-small")
-    parser.add_argument("--advisor-device", default=None)
     parser.add_argument("--command", default=None, help="Initial natural language command")
     parser.add_argument("--command-file", default=None, help="Path to a file containing operator commands")
-    parser.add_argument("--advisor-state", default="logs/advisor_state.json", help="Where to export advisor decisions")
     parser.add_argument("--command-state", default="logs/command_state.json", help="Where to export parsed commands")
-    parser.add_argument("--advisor-mode", choices=["strict", "normal"], default="normal")
+    parser.add_argument(
+        "--lane-sensitivity",
+        choices=["precision", "balanced", "aggressive"],
+        default="balanced",
+        help="Tune the lane detector between noise rejection and faster reactions",
+    )
     parser.add_argument("--safety-mindset", choices=["on", "off"], default="off")
     parser.add_argument("--ambient", choices=["on", "off"], default="on")
+    parser.add_argument(
+        "--advisor",
+        choices=["on", "off"],
+        default="on",
+        help="Enable the riding companion advisor narration",
+    )
     parser.add_argument(
         "--persona",
         choices=["calm_safe", "smart_scout", "playful"],
@@ -615,18 +635,7 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
         parser.error("Calibration distance/pixels must be positive")
 
     command_file = Path(args.command_file).expanduser() if args.command_file else None
-    advisor_state_path = Path(args.advisor_state).expanduser() if args.advisor_state else None
     command_state_path = Path(args.command_state).expanduser() if args.command_state else None
-
-    advisor_settings = AdvisorRuntimeConfig()
-    if args.advisor_mode == "strict":
-        advisor_settings.mode = "strict"
-        advisor_settings.min_conf_for_allow = 0.7
-        advisor_settings.ttc_block_s = 1.5
-        advisor_settings.block_debounce_ms = 1000
-        advisor_settings.timeout_grace_ticks = 0
-    else:
-        advisor_settings.mode = "normal"
 
     context_settings = ContextConfig()
     navigation_intent = NavigationIntentConfig()
@@ -634,6 +643,14 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
 
     safety_mindset = SafetyMindsetConfig()
     safety_mindset.enabled = args.safety_mindset == "on"
+
+    lane_detector = LaneDetectorConfig()
+    if args.lane_sensitivity == "precision":
+        lane_detector.min_confidence = 0.45
+        lane_detector.smoothing = 0.8
+    elif args.lane_sensitivity == "aggressive":
+        lane_detector.min_confidence = 0.25
+        lane_detector.smoothing = 0.4
 
     return PilotConfig(
         camera_source=args.camera,
@@ -645,20 +662,18 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
         iou_threshold=args.iou,
         visualize=args.visualize,
         log_dir=Path(args.log_dir).expanduser(),
-        advisor_enabled=not args.disable_advisor,
-        advisor_image_model=args.advisor_image_model,
-        advisor_language_model=args.advisor_language_model,
-        advisor_device=args.advisor_device,
-        advisor_state_path=advisor_state_path,
         command_state_path=command_state_path,
         initial_command=args.command,
         command_file=command_file,
-        advisor=advisor_settings,
+        arbiter=ArbiterRuntimeConfig(),
         context=context_settings,
         navigation_intent=navigation_intent,
         safety_mindset=safety_mindset,
         safety_mindset_enabled=safety_mindset.enabled,
         companion_persona=args.persona,
+        companion_enabled=args.advisor == "on",
+        lane_detector=lane_detector,
+        detector_device=args.device,
         vehicle_description=args.vehicle_description,
         vehicle_width_m=args.vehicle_width,
         vehicle_length_m=args.vehicle_length,
