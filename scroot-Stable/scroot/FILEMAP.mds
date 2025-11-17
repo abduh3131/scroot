@@ -22,12 +22,10 @@ The stack is pinned to Python 3.10+ and depends on the following packages declar
 | `ultralytics` | `>=8.1.0` | Provides YOLOv8 detector weights and runtime utilities with ONNX/TensorRT export compatibility for Jetson-class hardware. |
 | `opencv-python` | `>=4.8.0` | Supplies camera capture, image resizing, and visualization primitives across desktop and Jetson builds. |
 | `numpy` | `>=1.24.0` | Underpins numeric operations for occupancy map aggregation, filtering, and control smoothing. |
-| `torch` | `>=2.1.0` | Required to execute YOLOv8 as well as the multimodal advisor (BLIP + FLAN) efficiently on CPU or CUDA. |
-| `torchvision` | `>=0.16.0` | Bundles pre/post-processing transforms used by YOLO and image captioning models. |
-| `transformers` | `>=4.37.0` | Loads Hugging Face language models (FLAN-T5) and multimodal pipelines for the situational advisor. |
-| `accelerate` | `>=0.25.0` | Streamlines device placement and mixed-precision execution for the advisor on Jetson GPUs. |
-| `sentencepiece` | `>=0.1.99` | Tokenizer dependency for FLAN-T5 language understanding. |
-| `safetensors` | `>=0.3.1` | Speeds up secure model weight loading for BLIP/FLAN checkpoints. |
+| `torch` | `>=2.1.0` | Required to execute YOLOv8 efficiently on CPU or CUDA. |
+| `torchvision` | `>=0.16.0` | Bundles pre/post-processing transforms used by YOLO and lane visualization utilities. |
+| `psutil` | `>=5.9.0` | System monitoring used by the GUI to summarize hardware and runtime stats. |
+| `Pillow` | `>=10.0.0` | Converts OpenCV frames into Tk-compatible images for the GUI. |
 
 Jetson deployments can swap in vendor-optimized wheels as long as the versions meet or exceed these baselines.
 
@@ -39,12 +37,11 @@ The `autonomy` package is deliberately split into feature-oriented subpackages. 
 Exports convenience imports so downstream code can instantiate `AutonomyPilot` and configuration dataclasses without deep module paths.
 
 ### `autonomy/pilot.py`
-Central orchestrator that binds sensors, perception, navigation, advisor, and control. The `AutonomyPilot` class exposes a `run()` generator yielding raw `ActuatorCommand` tuples (`steer`, `throttle`, `brake`). It handles:
+Central orchestrator that binds sensors, perception, lane detection, navigation, arbiter, and control. The `AutonomyPilot` class exposes a `run()` generator yielding raw `ActuatorCommand` tuples (`steer`, `throttle`, `brake`). It handles:
 - Camera startup and graceful shutdown.
 - Polling the natural-language `CommandInterface`.
-- Passing frames through the `ObjectDetector` and `Navigator` to compute motion plans.
-- Invoking the `SituationalAdvisor` to enrich decisions with traffic-law directives and emergency stops.
-- Feeding `NavigationDecision` objects into the `Controller` for smoothing and actuator scaling.
+- Passing frames through the `ObjectDetector` and `LaneDetector`, then into the `Navigator` to compute motion plans.
+- Feeding `NavigationDecision` objects into the `Controller` and deterministic safety arbiter for smoothing and gating.
 - Persisting telemetry JSON and optional visualization overlays.
 
 ### `autonomy/sensors/camera.py`
@@ -53,11 +50,11 @@ Defines `CameraSensor`, a thin wrapper around OpenCV’s `VideoCapture` that exp
 ### `autonomy/perception/object_detection.py`
 Wraps Ultralytics YOLO to produce `PerceptionSummary` objects containing detections, obstacle density metrics, and frame metadata. Configuration toggles allow adjusting model name, confidence, and IoU thresholds.
 
+### `autonomy/perception/lane_detection.py`
+Implements the `LaneDetector`, which applies HLS thresholds, perspective warps, sliding windows, and polynomial fits to reconstruct lane lines. Outputs lane width, curvature, confidence, and lateral offset for downstream modules.
+
 ### `autonomy/ai/command_interface.py`
 Parses human directives such as “drive 2 m forward” or “turn around” into structured `HighLevelCommand` dataclasses. Supports live updates via a watched text file, default commands, and exports of the latest parsed state.
-
-### `autonomy/ai/advisor.py`
-Implements the multimodal `SituationalAdvisor` that fuses YOLO detections with BLIP image captions and FLAN-T5 reasoning. It emits textual guidance (e.g., “use the bike lane”) and can set `enforced_stop` flags when detecting pedestrians, stop signs, or conflicting instructions.
 
 ### `autonomy/planning/navigator.py`
 Holds the `Navigator`, which converts perception results and parsed commands into `NavigationDecision` outputs. Responsibilities include hazard scoring, speed targets, steering bias computation, and goal tracking for distance-based maneuvers.
@@ -80,16 +77,16 @@ Contains helper functions for exponential smoothing of speed/steering signals, r
 ## Launcher (`autonomy_launcher.py`)
 The single entry point for operators. Responsibilities:
 - Validates Python package dependencies before importing the heavy modules, providing actionable error messages if something is missing.
-- Parses CLI arguments for camera setup, YOLO configuration, advisor toggles, and logging destinations.
-- Instantiates `AutonomyPilot` and iterates through its command generator, printing each actuator triple alongside advisor guidance for integration with low-level motor controllers.
+- Parses CLI arguments for camera setup, YOLO configuration, arbiter/lane toggles, and logging destinations.
+- Instantiates `AutonomyPilot` and iterates through its command generator, printing each actuator triple alongside arbiter guidance for integration with low-level motor controllers.
 
 ## Data Flow Summary
 
 1. `autonomy_launcher.py` constructs `AutonomyPilot` using CLI-specified configuration.
-2. `CameraSensor` streams frames. `ObjectDetector` converts them into detection lists.
+2. `CameraSensor` streams frames. `ObjectDetector` and `LaneDetector` convert them into obstacle lists plus lane geometry.
 3. `CommandInterface` delivers the latest high-level goal (if any).
-4. `Navigator` evaluates detections plus goals to produce steering/speed intents.
-5. `SituationalAdvisor` (optional) analyzes frames and detections to append directives or trigger stops.
+4. `Navigator` evaluates detections, lane estimates, and goals to produce steering/speed intents.
+5. The deterministic arbiter evaluates hazards, lane confidence, and mindset caps to ALLOW/AMEND/BLOCK proposed commands before they reach the `Controller`.
 6. `Controller` generates final actuator outputs, which the launcher prints or forwards.
 7. `AutonomyPilot` continuously exports JSON state for external monitoring and respects stop signals for safe shutdowns.
 
