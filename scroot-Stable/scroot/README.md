@@ -11,10 +11,10 @@ This package contains a self-contained autonomous driving stack tailored for lig
 - Optional safety mindset profiles that cap maximum speed / clearance and adapt to lane uncertainty or sensor degradation.
 - Vehicle envelope modeling with user-defined dimensions and camera calibration to keep commands within real clearance limits.
 - Riding companion narration that explains each arbiter decision without blocking the control loop.
-- Advanced lane detector that mirrors openpilot’s perspective transform + sliding window technique to measure curvature, lane width, and lateral offset in real time.
+- Advanced bird’s-eye lane detector (mirrors openpilot’s lateral planner) that equalizes lighting, warps each frame, and feeds curvature/offset data straight back into the pilot.
 - Lane-aware navigator that blends those lane offsets back into the steering bias so the pilot recenters inside bike lanes or shoulders automatically.
 - CPU/GPU acceleration toggle plus an advisor switch so you can run entirely on CPU hardware, enable a Quadro P520 compatibility mode, and silence narration when you need the lightest loop.
-- Live launch dashboard with camera feed, projected path overlays, throttle/brake gauges, actuator readouts, and lane/arbiter status.
+- Live launch dashboard with camera feed, translucent lane-corridor overlays, throttle/brake gauges, actuator readouts, and lane/arbiter status plus a bird’s-eye mini-map.
 - Scroll-friendly desktop GUI with Setup, Launch, and Media Test tabs so you can configure hardware, run the live pilot, or upload recorded drives for offline evaluation.
 - Command parser that understands phrases such as "drive to the plaza", "drive 2 m forward", or "turn right" and feeds them into the navigator.
 - Structured telemetry exports (`logs/command_state.json`, `logs/telemetry.jsonl`, `logs/incidents.jsonl`) for auditing and supervision.
@@ -128,7 +128,7 @@ The launcher accepts several runtime flags:
 
 1. **CameraSensor** (`autonomy/sensors/camera.py`) continuously streams frames.
 2. **ObjectDetector** (`autonomy/perception/object_detection.py`) identifies obstacles using YOLO and returns bounding boxes. The detector now honors `--device`/Acceleration Mode, so you can run entirely on CPU.
-3. **LaneDetector** (`autonomy/perception/lane_detection.py`) warps the roadway, fits lane lines, and reports curvature/offset values that mirror openpilot’s lateral planner.
+3. **LaneDetector** (`autonomy/perception/lane_detection.py`) equalizes lighting, runs Sobel/Canny filters, warps the roadway into a cached bird’s-eye view, fits lane lines, and reports curvature/offset values that mirror openpilot’s lateral planner.
 4. **CommandInterface** (`autonomy/ai/command_interface.py`) parses operator phrases and exposes structured goals.
 5. **Navigator** (`autonomy/planning/navigator.py`) blends obstacle density, lane geometry, and the active goal to produce a steering bias, target speed, and goal context. Lane offsets directly nudge the steering bias back toward the center of any detected lane/shoulder.
 6. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
@@ -137,7 +137,15 @@ The launcher accepts several runtime flags:
 
 ### Lane detection and openpilot inspiration
 
-The new lane detector mirrors openpilot’s lateral planner but stays lightweight enough for Python 3.8 laptops and Jetson boards. Each frame is blurred, converted to HLS, thresholded for bright/yellow markings, then warped into a bird’s-eye view. Sliding windows trace both lane lines, least-squares fits yield second-order polynomials, and the system projects the lines back onto the live feed. From those fits we derive lane width, curvature, and the scooter’s lateral offset in meters. The navigator feeds those offsets back into the steering bias so the pilot recenters inside any detected lane, while the arbiter tags AMEND/BLOCK events with `lane_bias_right`, `lane_too_narrow`, or `unknown_lane` when confidence drops.
+The upgraded lane detector still mirrors openpilot’s lateral planner but now layers several lightweight enhancements so it performs well on CPU-only laptops and Jetson Orin dev kits:
+
+1. **Contrast-limited equalization + color masks** – The HLS lightness channel runs through CLAHE so worn paint and low-light clips remain visible before we threshold for white/yellow markings.
+2. **Gradient + Canny edges** – Sobel derivatives and Canny edges catch faded lane tape that color alone would miss.
+3. **Bird’s-eye warp cache** – Perspective matrices are cached per resolution so each frame jumps straight into the top-down view without re-solving homographies.
+4. **Sliding-window tracker** – The detector gathers lane pixels with the classic openpilot window search, smooths polynomial fits frame-to-frame, and rejects results that fall below the configured confidence.
+5. **Reprojection + overlay** – The left/right rails and the center corridor are projected back on top of the live feed, filled with a translucent highlight, and echoed in a mini bird’s-eye inset so you can see what the detector thinks at a glance.
+
+From those fits we derive lane width, curvature, and the scooter’s lateral offset in meters. The navigator feeds those offsets back into the steering bias so the pilot recenters inside any detected lane, while the arbiter tags AMEND/BLOCK events with `lane_bias_right`, `lane_too_narrow`, or `unknown_lane` when confidence drops.
 
 ## Command Interface Tips
 

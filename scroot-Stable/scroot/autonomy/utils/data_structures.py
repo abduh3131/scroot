@@ -73,6 +73,8 @@ class LaneEstimate:
     recommended_bias: float
     points_left: Tuple[Tuple[int, int], ...]
     points_right: Tuple[Tuple[int, int], ...]
+    lane_area: Tuple[Tuple[int, int], ...] = ()
+    birdseye_outline: Tuple[Tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)

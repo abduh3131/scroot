@@ -386,10 +386,14 @@ class AutonomyPilot:
         )
 
         if lane_estimate:
+            if lane_estimate.lane_area:
+                lane_layer = np.zeros_like(overlay)
+                cv2.fillPoly(lane_layer, [np.array(lane_estimate.lane_area)], (40, 200, 220))
+                overlay = cv2.addWeighted(overlay, 1.0, lane_layer, 0.35, 0)
             if lane_estimate.points_left:
-                cv2.polylines(overlay, [np.array(lane_estimate.points_left)], False, (255, 215, 0), 3)
+                cv2.polylines(overlay, [np.array(lane_estimate.points_left)], False, (255, 215, 0), 2)
             if lane_estimate.points_right:
-                cv2.polylines(overlay, [np.array(lane_estimate.points_right)], False, (0, 191, 255), 3)
+                cv2.polylines(overlay, [np.array(lane_estimate.points_right)], False, (0, 191, 255), 2)
             center_path = []
             for left_pt, right_pt in zip(lane_estimate.points_left, lane_estimate.points_right):
                 cx = int((left_pt[0] + right_pt[0]) / 2)
@@ -397,6 +401,33 @@ class AutonomyPilot:
                 center_path.append((cx, cy))
             if center_path:
                 cv2.polylines(overlay, [np.array(center_path)], False, (102, 255, 102), 2)
+
+            if lane_estimate.birdseye_outline:
+                inset_height = max(80, height // 5)
+                inset_width = max(80, width // 6)
+                inset = np.zeros((inset_height, inset_width, 3), dtype=np.uint8)
+                bev_array = np.array(lane_estimate.birdseye_outline, dtype=np.float32)
+                max_x = max(1.0, float(np.max(bev_array[:, 0])))
+                max_y = max(1.0, float(np.max(bev_array[:, 1])))
+                scale_x = inset_width / max_x
+                scale_y = inset_height / max_y
+                bev_scaled = np.array(
+                    [
+                        (
+                            int(pt[0] * scale_x),
+                            int(inset_height - 1 - pt[1] * scale_y),
+                        )
+                        for pt in lane_estimate.birdseye_outline
+                    ]
+                )
+                if bev_scaled.size:
+                    cv2.fillPoly(inset, [bev_scaled], (0, 120, 180))
+                    cv2.polylines(inset, [bev_scaled], True, (0, 255, 180), 1)
+                    inset_x = width - inset_width - 12
+                    inset_y = 12
+                    roi = overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width]
+                    blended = cv2.addWeighted(roi, 0.65, inset, 0.35, 0)
+                    overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width] = blended
 
         review = getattr(arbitration, "review", None)
         if review:

@@ -73,7 +73,7 @@ The Launch tab controls runtime options and lets you start/stop the autonomy loo
 - **Launch Log** streams real-time telemetry, including actuator commands, arbiter verdicts (`ALLOW`, `AMEND`, `BLOCK`), reason tags (e.g., `ttc_low`, `lane_bias_right`), and narration lines.
 
 ### Live Camera, Overlay, and Messaging
-- **Live Feed panel** shows the current camera image with projected trajectory lines (center and envelope boundaries). The banner color mirrors the arbiter verdict (green = ALLOW, amber = AMEND, red = BLOCK) and lists reason tags plus latency.
+- **Live Feed panel** shows the current camera image with projected trajectory lines (center and envelope boundaries). The banner color mirrors the arbiter verdict (green = ALLOW, amber = AMEND, red = BLOCK) and lists reason tags plus latency. The lane detector paints a translucent corridor between the rails and drops a miniature bird’s-eye inset in the upper-right corner so you can verify what the detector sees.
 - **Throttle/Brake gauges** update each tick to mirror actuator outputs. Green bars rise with throttle, red bars rise with braking, and the steer readout helps correlate servo motion with what you see on screen.
 - **Gate tags & caps** appear inside the overlay text whenever the SafetyGate clamps throttle (`caps_speed`, `envelope_stop`, etc.) or when the Safety Mindset imposes a stricter limit.
 - **Command Messaging box** records every verdict change and directive in natural language. Use the entry field to send commands such as “drive 3 m forward”, “turn left”, or “stop” without leaving the GUI—the Command Interface parses them immediately.

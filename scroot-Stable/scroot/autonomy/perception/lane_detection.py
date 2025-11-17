@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -18,23 +18,27 @@ class LaneDetectorConfig:
     min_pixels: int = 500
     smoothing: float = 0.6
     min_confidence: float = 0.35
-
-
-class LaneDetector:
-    """Detects lane boundaries using perspective warps and sliding windows."""
-
-    _SRC_POINTS = np.float32([
+    clahe_clip_limit: float = 2.0
+    clahe_grid_size: int = 8
+    morph_kernel_px: int = 5
+    sobel_kernel: int = 3
+    canny_threshold: Tuple[int, int] = (40, 110)
+    src_points: Tuple[Tuple[float, float], ...] = (
         (0.12, 1.0),
         (0.88, 1.0),
         (0.62, 0.62),
         (0.38, 0.62),
-    ])
-    _DST_POINTS = np.float32([
+    )
+    dst_points: Tuple[Tuple[float, float], ...] = (
         (0.2, 1.0),
         (0.8, 1.0),
         (0.8, 0.0),
         (0.2, 0.0),
-    ])
+    )
+
+
+class LaneDetector:
+    """Detects lane boundaries using perspective warps and sliding windows."""
 
     def __init__(
         self,
@@ -45,6 +49,9 @@ class LaneDetector:
         self.config = config or LaneDetectorConfig()
         self._prev_left_fit: Optional[np.ndarray] = None
         self._prev_right_fit: Optional[np.ndarray] = None
+        self._warp_matrix: Optional[np.ndarray] = None
+        self._warp_matrix_inv: Optional[np.ndarray] = None
+        self._last_shape: Optional[Tuple[int, int]] = None
 
     def analyze(self, frame: np.ndarray) -> Optional[LaneEstimate]:
         if not self.config.enabled:
@@ -77,6 +84,11 @@ class LaneDetector:
 
         lane_points_left = self._project_points(left_fitx, ploty, Minv)
         lane_points_right = self._project_points(right_fitx, ploty, Minv)
+        lane_area = self._lane_area_polygon(lane_points_left, lane_points_right)
+        birdseye_outline = self._lane_area_polygon(
+            self._bev_points(left_fitx, ploty),
+            self._bev_points(right_fitx, ploty),
+        )
 
         lane_metrics = self._compute_metrics(
             warped,
@@ -103,6 +115,8 @@ class LaneDetector:
             recommended_bias=recommended_bias,
             points_left=lane_points_left,
             points_right=lane_points_right,
+            lane_area=lane_area,
+            birdseye_outline=birdseye_outline,
         )
 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
@@ -111,36 +125,84 @@ class LaneDetector:
         l_channel = hls[:, :, 1]
         s_channel = hls[:, :, 2]
 
-        _, white_mask = cv2.threshold(l_channel, 200, 255, cv2.THRESH_BINARY)
+        clahe = cv2.createCLAHE(
+            clipLimit=max(0.5, float(self.config.clahe_clip_limit)),
+            tileGridSize=(
+                max(2, int(self.config.clahe_grid_size)),
+                max(2, int(self.config.clahe_grid_size)),
+            ),
+        )
+        l_equalized = clahe.apply(l_channel)
+
+        _, white_mask = cv2.threshold(l_equalized, 200, 255, cv2.THRESH_BINARY)
         yellow_mask = cv2.inRange(hls, (15, 60, 120), (35, 204, 255))
 
         gray = cv2.cvtColor(blur, cv2.COLOR_BGR2GRAY)
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobelx = cv2.Sobel(
+            gray,
+            cv2.CV_64F,
+            1,
+            0,
+            ksize=max(1, int(self.config.sobel_kernel) // 2 * 2 + 1),
+        )
         abs_sobel = np.absolute(sobelx)
-        scaled_sobel = np.uint8(255 * abs_sobel / np.max(abs_sobel)) if abs_sobel.max() > 0 else np.uint8(abs_sobel)
-        _, grad_mask = cv2.threshold(scaled_sobel, 40, 255, cv2.THRESH_BINARY)
+        scaled_sobel = (
+            np.uint8(255 * abs_sobel / np.max(abs_sobel)) if abs_sobel.max() > 0 else np.uint8(abs_sobel)
+        )
+        _, grad_mask = cv2.threshold(scaled_sobel, 30, 255, cv2.THRESH_BINARY)
+
+        canny = cv2.Canny(
+            l_equalized,
+            max(0, int(self.config.canny_threshold[0])),
+            max(1, int(self.config.canny_threshold[1])),
+        )
 
         combined = cv2.bitwise_or(white_mask, grad_mask)
         combined = cv2.bitwise_or(combined, yellow_mask)
+        combined = cv2.bitwise_or(combined, canny)
 
         mask = np.zeros_like(combined)
         start_row = int(mask.shape[0] * self.config.roi_top_ratio)
         mask[start_row:, :] = combined[start_row:, :]
-        return mask
+        return self._refine_mask(mask)
+
+    def _refine_mask(self, mask: np.ndarray) -> np.ndarray:
+        kernel_size = max(3, int(self.config.morph_kernel_px) // 2 * 2 + 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        dilated = cv2.dilate(closed, kernel, iterations=1)
+        return dilated
 
     def _warp(self, binary: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         height, width = binary.shape
-        src = self._SRC_POINTS.copy()
-        dst = self._DST_POINTS.copy()
-        src[:, 0] *= width
-        src[:, 1] *= height
-        dst[:, 0] *= width
-        dst[:, 1] *= height
+        if self._last_shape != (height, width):
+            self._compute_warp_matrices(width, height)
+            self._last_shape = (height, width)
 
-        matrix = cv2.getPerspectiveTransform(src, dst)
-        matrix_inv = cv2.getPerspectiveTransform(dst, src)
-        warped = cv2.warpPerspective(binary, matrix, (width, height), flags=cv2.INTER_LINEAR)
-        return warped, matrix_inv
+        if self._warp_matrix is None or self._warp_matrix_inv is None:
+            return None, None
+
+        warped = cv2.warpPerspective(
+            binary,
+            self._warp_matrix,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+        )
+        return warped, self._warp_matrix_inv
+
+    def _compute_warp_matrices(self, width: int, height: int) -> None:
+        src = self._scale_points(self.config.src_points, width, height)
+        dst = self._scale_points(self.config.dst_points, width, height)
+        self._warp_matrix = cv2.getPerspectiveTransform(src, dst)
+        self._warp_matrix_inv = cv2.getPerspectiveTransform(dst, src)
+
+    @staticmethod
+    def _scale_points(points: Sequence[Tuple[float, float]], width: int, height: int) -> np.ndarray:
+        pts = np.array(points, dtype=np.float32)
+        scaled = pts.copy()
+        scaled[:, 0] *= width
+        scaled[:, 1] *= height
+        return scaled
 
     def _sliding_window_search(
         self, warped: np.ndarray
@@ -229,6 +291,26 @@ class LaneDetector:
         warped = cv2.perspectiveTransform(pts, matrix_inv)
         coords = tuple((int(x), int(y)) for [[x, y]] in warped)
         return coords
+
+    def _lane_area_polygon(
+        self,
+        left: Tuple[Tuple[int, int], ...],
+        right: Tuple[Tuple[int, int], ...],
+    ) -> Tuple[Tuple[int, int], ...]:
+        if not left or not right:
+            return ()
+        if len(left) != len(right):
+            limit = min(len(left), len(right))
+            left = left[:limit]
+            right = right[:limit]
+        polygon = list(left) + list(reversed(right))
+        if len(polygon) < 6:
+            return ()
+        return tuple(polygon)
+
+    @staticmethod
+    def _bev_points(xs: np.ndarray, ys: np.ndarray) -> Tuple[Tuple[int, int], ...]:
+        return tuple((int(x), int(y)) for x, y in zip(xs, ys))
 
     def _compute_metrics(
         self,

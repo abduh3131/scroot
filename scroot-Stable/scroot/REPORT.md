@@ -1,7 +1,7 @@
 # Development Report
 
 ## Overview
-The scooter autonomy stack now runs on Python 3.8 and newer, spans Jetson Orin to desktop GPUs, and offers a friendlier desktop app. The GUI scrolls smoothly on every tab, applies Jetson-specific CUDA defaults when that hardware is detected, and stores state between sessions. A brand-new **Media Test** tab lets you upload any road clip or still photo, run it through the entire pilot, and save a video with steering, throttle, braking, lane cues, and narration painted on top &mdash; now to any folder you pick, and with a Stop button so you can switch clips instantly. Under the hood the openpilot-style lane detector directly steers the navigator back toward the center of any detected lane, the YOLO stack can be forced to run on CPU when CUDA kernels are missing, a Quadro P520 compatibility option locks YOLO to `cuda:0` on legacy laptops, and the advisor narration is a simple checkbox away.
+The scooter autonomy stack now runs on Python 3.8 and newer, spans Jetson Orin to desktop GPUs, and offers a friendlier desktop app. The GUI scrolls smoothly on every tab, applies Jetson-specific CUDA defaults when that hardware is detected, and stores state between sessions. A brand-new **Media Test** tab lets you upload any road clip or still photo, run it through the entire pilot, and save a video with steering, throttle, braking, lane cues, and narration painted on top &mdash; now to any folder you pick, and with a Stop button so you can switch clips instantly. Under the hood the openpilot-style lane detector now performs CLAHE/Canny preprocessing, caches its bird’s-eye warp, draws a translucent lane corridor plus a bird’s-eye inset, and feeds those offsets right back into the navigator so the pilot actively seeks the center of every detected lane. The YOLO stack can be forced to run on CPU when CUDA kernels are missing, a Quadro P520 compatibility option locks YOLO to `cuda:0` on legacy laptops, and the advisor narration is a simple checkbox away.
 
 ## Program Features to Date
 1. **Autonomy Pilot Core** – Camera ingestion, YOLO-based object detection, the new perspective-based lane detector, navigator, controller, safety mindset, telemetry logging, and riding companion narration all run inside `AutonomyPilot`.
@@ -20,7 +20,15 @@ The scooter autonomy stack now runs on Python 3.8 and newer, spans Jetson Orin t
 4. Watch the preview panel update in real time. The log explains each step (loading media, running inference, writing frames) so you can diagnose codec or dependency issues instantly.
 
 ## Lane Detector: How & Why
-The refreshed lane detector lives inside `autonomy/perception/lane_detection.py` and feeds both the navigator and arbiter. Each frame is blurred, converted to HLS, thresholded for white/yellow paint, and warped into a bird’s-eye view. Sliding windows gather lane pixels, second-order polynomials are fit for left/right boundaries, and the curves are projected back onto the live feed. That gives us lane width, curvature, and lateral offset in meters—exactly the cues openpilot’s `selfdrive/controls/lib/lateral_planner.py` uses, but implemented with pure OpenCV/Numpy so it still runs on Python 3.8 laptops and Jetson Orin boards. The navigator now blends those offsets back into the steering bias so the pilot recenters inside the detected lane, and the arbiter still logs reason tags such as `lane_bias_right`, `lane_too_narrow`, or `unknown_lane` whenever AMEND/BLOCK decisions fire.
+The refreshed lane detector lives inside `autonomy/perception/lane_detection.py` and feeds both the navigator and arbiter. Each frame now goes through a five-stage pipeline that stays lightweight enough for Python 3.8 laptops and Jetson Orin boards:
+
+1. **Contrast-limited adaptive histogram equalization (CLAHE)** keeps lane paint visible even in dim or overexposed captures before we mask for white/yellow hues.
+2. **Gradient + edge cues** from Sobel derivatives and Canny edges detect faded markings that color filters alone would miss.
+3. **Cached bird’s-eye warp** avoids recomputing homographies when the resolution stays constant, saving CPU/GPU cycles on embedded hardware.
+4. **Sliding-window fits with temporal smoothing** recreate both rails and compute curvature, width, and lateral offset in meters.
+5. **Projection + visualization** paints the lane corridor back on the live feed, fills it with a translucent band, and produces a mini bird’s-eye inset so operators can sanity-check the detector instantly.
+
+Those metrics mirror the cues openpilot’s `selfdrive/controls/lib/lateral_planner.py` uses. The navigator blends the offsets back into the steering bias so the pilot recenters inside the detected lane, and the arbiter continues logging reason tags such as `lane_bias_right`, `lane_too_narrow`, or `unknown_lane` whenever AMEND/BLOCK decisions fire.
 
 ## References
 - openpilot `selfdrive/controls/lib/lateral_planner.py` – inspiration for translating lane confidence into lateral bias and safety caps.
