@@ -11,15 +11,15 @@ The Setup tab prepares the autonomy stack for your hardware and vehicle.
 - **Rescan Hardware** &mdash; Runs the detection again. Use this after moving the SD card to a different Jetson, switching from WSL to native Ubuntu, or upgrading components so the GUI can recommend fresh profiles.
 
 ### Vehicle Envelope Panel
-These fields teach the Advisor how much space your vehicle occupies and how close it may drive to obstacles.
+These fields teach the safety arbiter how much space your vehicle occupies and how close it may drive to obstacles.
 
 | Field | What it does | Tips |
 | --- | --- | --- |
 | **Description** | Human-readable name used in narration and logs. | e.g., `Delivery Scooter`, `Cargo Cart`.
-| **Width / Length / Height (m)** | Physical dimensions in meters. Advisor, navigator, and SafetyGate use them to reject paths that are too narrow or low. | Measure the widest/longest points, including accessories such as baskets or mirrors.
+| **Width / Length / Height (m)** | Physical dimensions in meters. The navigator and SafetyGate use them to reject paths that are too narrow or low. | Measure the widest/longest points, including accessories such as baskets or mirrors.
 | **Side Margin (m)** | Extra clearance you want on *each* side. Added to the width when checking lanes and curbs. | Typical scooters use `0.20–0.35`. Increase for cargo trailers or shaky environments.
 | **Calibration Distance (m)** | Distance from the camera to the vehicle when you capture a reference frame. Used to convert pixel width to meters. | Place the vehicle at a known distance (e.g., 2 m) straight in front of the camera.
-| **Reference Width (px)** | Pixel width of the vehicle in that reference frame. Lets the Advisor reason about real-world spacing from video. | Take a calibration photo, measure with an image viewer, enter the pixel count.
+| **Reference Width (px)** | Pixel width of the vehicle in that reference frame. Lets the arbiter reason about real-world spacing from video. | Take a calibration photo, measure with an image viewer, enter the pixel count.
 
 Validation runs when you press **Save Setup**; the app warns if any value is missing or non-numeric.
 
@@ -47,43 +47,51 @@ The Launch tab controls runtime options and lets you start/stop the autonomy loo
 ### Resolution & FPS
 - **Resolution** fields set capture width and height in pixels.
 - **FPS** sets the target frame rate for the capture loop.
-- **Recommended defaults**: start with `1280 x 720` at `30 FPS`. Drop to `960 x 540` or `848 x 480` at `20–24 FPS` on Jetson Nano/WSL VMs if the Advisor reports latency spikes. Higher-tier GPUs can push `1920 x 1080` at `30 FPS`.
+- **Recommended defaults**: start with `1280 x 720` at `30 FPS`. Drop to `960 x 540` or `848 x 480` at `20–24 FPS` on Jetson Nano/WSL VMs if the Launch Log reports arbiter timeouts. Higher-tier GPUs can push `1920 x 1080` at `30 FPS`.
+
+### Acceleration Mode
+- **Acceleration dropdown** chooses how Ultralytics YOLO runs: `auto` (use CUDA when available), `cpu` (force a CUDA-free path that mirrors the screenshot error fix), `cuda` (insist on GPU execution), or `quadro_p520` (locks YOLO to `cuda:0` with conservative timing for that board). The setting feeds both the live pilot and the Media Test harness so you can keep everything CPU-bound on lightweight laptops or squeeze extra mileage out of legacy GPUs such as the Quadro P520.
 
 ### Visualization Toggle
 - **Enable Visualization** displays OpenCV windows with overlays. Disable it when running headless or when the display overhead reduces FPS.
 
 ### Safety & Behavior Toggles
-- **Enable Advisor** &mdash; Turns the arbitration layer on/off. Keep it enabled for normal operation; disabling reverts to raw Pilot commands without ALLOW/AMEND/BLOCK safety decisions.
-- **Advisor Mode** &mdash; Chooses how cautious the Advisor is:
-  - `normal` &mdash; Balanced. Prefers AMEND (steer nudges, throttle trims) before BLOCK, allows one tick of grace if a computation overruns its budget, and requires moderate confidence to ALLOW.
-  - `strict` &mdash; Conservative. Blocks immediately on timeouts or low confidence, raises TTC thresholds for fail-stops, extends the hold time before releasing a BLOCK, and expects higher sensor confidence for ALLOW decisions.
-- **Advisor Model** &mdash; Picks the vision-language workload used by the Advisor overlay and narration:
-  - `light` &mdash; BLIP-base + FLAN-T5-small. Lowest latency for CPU-only laptops or Jetson Nano.
-  - `normal` &mdash; BLIP-large + FLAN-T5-base. Balanced reasoning on Jetson Xavier/NX or modern laptops.
-  - `heavy` &mdash; BLIP-large + FLAN-T5-large. Richest commentary for desktop GPUs with generous VRAM.
+- **Lane Detector Profile** &mdash; Chooses how aggressively the openpilot-style detector trusts pixel evidence:
+  - `precision` &mdash; Highest confidence threshold with aggressive smoothing; ideal for narrow bike lanes.
+  - `balanced` &mdash; Default compromise tuned for mixed urban riding.
+  - `aggressive` &mdash; Lower threshold with minimal smoothing so the pilot reacts quickly on twisty or poorly marked paths.
 - **Safety Mindset** &mdash; Enables (`on`) or disables (`off`) the risk-based caps that clamp max speed and enforce minimum clearance. When enabled, mindset profiles (cautious pedestrian, low visibility, etc.) activate automatically based on context.
-- **Ambient Mode** &mdash; When `on`, the scooter only creeps forward when the Advisor explicitly ALLOWS/AMENDS and no user goal is set. Turning it `off` lets the Pilot pursue goals aggressively even without Advisor encouragement.
-- **Companion Persona** &mdash; Picks the narration tone for status messages:
+- **Ambient Mode** &mdash; When `on`, the scooter only creeps forward when the arbiter explicitly ALLOWS/AMENDS and no user goal is set. Turning it `off` lets the Pilot pursue goals aggressively even without arbiter encouragement.
+- **Advisor toggle + Persona** &mdash; Use **Enable Advisor Narration** to turn the riding companion on/off. When enabled, the persona dropdown picks the narration tone:
   - `calm_safe` &mdash; Reassuring, concise safety callouts.
   - `smart_scout` &mdash; Analytical, includes more scene context.
-  - `playful` &mdash; Light-hearted phrasing while still reporting Advisor verdicts. Messages remain rate-limited to ≤1 every 2 s.
+  - `playful` &mdash; Light-hearted phrasing while still reporting arbiter verdicts. Messages remain rate-limited to ≤1 every 2 s.
 
 ### Launch Controls
-- **Start Pilot** launches the autonomy stack using all settings from both tabs (camera, vehicle envelope, advisor config, etc.). The button disables itself while the system runs.
+- **Start Pilot** launches the autonomy stack using all settings from both tabs (camera, vehicle envelope, lane profile, mindset, etc.). The button disables itself while the system runs.
 - **Stop Pilot** sends a stop signal to the background thread. Always use this before closing the application to ensure logs flush cleanly.
-- **Launch Log** streams real-time telemetry, including actuator commands, Advisor verdicts (`ALLOW`, `AMEND`, `BLOCK`), reason tags (e.g., `ttc_low`, `lane_bias_right`), and narration lines.
+- **Launch Log** streams real-time telemetry, including actuator commands, arbiter verdicts (`ALLOW`, `AMEND`, `BLOCK`), reason tags (e.g., `ttc_low`, `lane_bias_right`), and narration lines.
 
 ### Live Camera, Overlay, and Messaging
-- **Live Feed panel** shows the current camera image with projected trajectory lines (center and envelope boundaries). The banner color mirrors the Advisor verdict (green = ALLOW, amber = AMEND, red = BLOCK) and lists reason tags plus latency.
+- **Live Feed panel** shows the current camera image with projected trajectory lines (center and envelope boundaries). The banner color mirrors the arbiter verdict (green = ALLOW, amber = AMEND, red = BLOCK) and lists reason tags plus latency. The lane detector paints a translucent corridor between the rails and drops a miniature bird’s-eye inset in the upper-right corner so you can verify what the detector sees.
 - **Throttle/Brake gauges** update each tick to mirror actuator outputs. Green bars rise with throttle, red bars rise with braking, and the steer readout helps correlate servo motion with what you see on screen.
 - **Gate tags & caps** appear inside the overlay text whenever the SafetyGate clamps throttle (`caps_speed`, `envelope_stop`, etc.) or when the Safety Mindset imposes a stricter limit.
-- **Advisor Messaging box** records every verdict change and directive in natural language. Use the entry field to send commands such as “drive 3 m forward”, “turn left”, or “stop” without leaving the GUI—the Command Interface parses them immediately.
+- **Command Messaging box** records every verdict change and directive in natural language. Use the entry field to send commands such as “drive 3 m forward”, “turn left”, or “stop” without leaving the GUI—the Command Interface parses them immediately.
 
-## 3. Best Practices & Troubleshooting
+## 3. Media Test Tab
+
+- **Media file** lets you browse to any dashcam clip (`.mp4`, `.mov`, `.avi`, `.mkv`) or still photo (`.png`, `.jpg`, `.bmp`).
+- **Overlay output** accepts an optional folder or filename. Leave it blank to reuse `logs/media_tests/`, or browse to any destination (the app will ensure the folder exists and append `.mp4` if needed).
+- **Generate Overlay** replays that media through the same configuration you set on the Launch tab, so your offline run mirrors the live stack (lane profile, mindset, resolution, Jetson tuning, etc.).
+- **Stop** immediately cancels the export, removes any partial overlay, and re-enables the start button so you can switch clips without waiting.
+- **Preview panel** shows the most recent overlay frame with steering vectors, throttle/brake gauges, lane lines, directives, and narration. It updates while the export runs.
+- **Status text + log** explain exactly what the exporter is doing (loading media, applying the pilot, writing frames). When it finishes, the output `.mp4` path is printed so you can open or share it.
+
+## 4. Best Practices & Troubleshooting
 
 - **First run flow**: Run `python setup_scroot.py --skip-models`, activate `.venv/`, and execute `python -m pip install -r autonomy/requirements.txt` before launching `python scooter_app.py`. The bootstrapper still rescans hardware on each launch; rerun **Install Dependencies** if you switch profiles.
 - **Camera testing**: Use `python autonomy_launcher.py --visualize` after configuring the camera to confirm the feed before a full ride.
-- **Advisor feedback**: Watch the Launch Log for reason tags like `unknown_lane` or `timeout`. Frequent timeouts mean you should lower resolution/FPS or pick a lighter model profile.
-- **Incident logs**: Anytime the Advisor AMENDs or BLOCKs, entries go to `logs/incidents.jsonl` with references to 5-second clips (if recorded) for quick review.
+- **Arbiter feedback**: Watch the Launch Log for reason tags like `unknown_lane` or `timeout`. Frequent timeouts mean you should lower resolution/FPS or pick a lighter model profile.
+- **Incident logs**: Anytime the arbiter AMENDs or BLOCKs, entries go to `logs/incidents.jsonl` with references to 5-second clips (if recorded) for quick review.
 
 With these references, every toggle in the GUI should map cleanly to the safety, navigation, or hardware behavior you expect during a ride.

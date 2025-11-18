@@ -1,4 +1,4 @@
-"""Telemetry helpers for advisor arbitration."""
+"""Telemetry helpers for safety arbitration."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any, Dict, Iterable, Optional
 
 from autonomy.utils.data_structures import (
     ActuatorCommand,
-    AdvisorReview,
-    AdvisorVerdict,
+    ArbiterReview,
+    ArbiterVerdict,
     ContextSnapshot,
     NavigationDecision,
     NavigationSubGoal,
@@ -33,7 +33,7 @@ class TelemetryLogger:
         decision: NavigationDecision,
         proposed: ActuatorCommand,
         result: ActuatorCommand,
-        review: AdvisorReview,
+        review: ArbiterReview,
         caps: SafetyCaps,
         context: ContextSnapshot,
         gate_tags: Iterable[str],
@@ -42,7 +42,7 @@ class TelemetryLogger:
     ) -> None:
         payload: Dict[str, Any] = {
             "timestamp": timestamp,
-            "advisor": {
+            "arbiter": {
                 "decision": review.verdict.value,
                 "reason_tags": list(review.reason_tags),
                 "latency_ms": review.latency_ms,
@@ -78,7 +78,7 @@ class TelemetryLogger:
         with self.telemetry_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload) + "\n")
 
-        if review.verdict in {AdvisorVerdict.AMEND, AdvisorVerdict.BLOCK}:
+        if review.verdict in {ArbiterVerdict.AMEND, ArbiterVerdict.BLOCK}:
             incident = {
                 "timestamp": timestamp,
                 "decision": review.verdict.value,

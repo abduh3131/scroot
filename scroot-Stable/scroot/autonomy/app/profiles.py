@@ -8,26 +8,24 @@ from typing import Dict, List, Tuple
 from autonomy.app.hardware import HardwareProfile
 
 
-@dataclass(slots=True)
+@dataclass
 class ModelProfile:
     key: str
     label: str
     description: str
     yolo_model: str
-    advisor_image_model: str
-    advisor_language_model: str
 
 
-@dataclass(slots=True)
-class AdvisorModelProfile:
+@dataclass
+class LaneProfile:
     key: str
     label: str
     description: str
-    advisor_image_model: str
-    advisor_language_model: str
+    min_confidence: float
+    smoothing: float
 
 
-@dataclass(slots=True)
+@dataclass
 class DependencyProfile:
     key: str
     label: str
@@ -40,51 +38,54 @@ MODEL_PROFILES: Dict[str, ModelProfile] = {
     "lightweight": ModelProfile(
         key="lightweight",
         label="Lightweight",
-        description="Optimized for CPUs with ≤4 cores or <8 GB RAM. Uses YOLOv8n and smaller advisor models.",
+        description="Optimized for CPUs with ≤4 cores or <8 GB RAM. Uses YOLOv8n and lower FPS settings.",
         yolo_model="yolov8n.pt",
-        advisor_image_model="Salesforce/blip-image-captioning-base",
-        advisor_language_model="google/flan-t5-small",
     ),
     "standard": ModelProfile(
         key="standard",
         label="Standard",
         description="Balanced profile for mid-tier laptops or Jetson Xavier devices.",
         yolo_model="yolov8s.pt",
-        advisor_image_model="Salesforce/blip-image-captioning-large",
-        advisor_language_model="google/flan-t5-base",
     ),
     "performance": ModelProfile(
         key="performance",
         label="Performance",
-        description="High-end profile using YOLOv8m and FLAN-T5-large for richer guidance.",
+        description="High-end profile using YOLOv8m for richer detections at higher speeds.",
         yolo_model="yolov8m.pt",
-        advisor_image_model="Salesforce/blip-image-captioning-large",
-        advisor_language_model="google/flan-t5-large",
+    ),
+    "jetson_orin": ModelProfile(
+        key="jetson_orin",
+        label="Jetson Orin Optimized",
+        description=(
+            "Tailored defaults for NVIDIA Jetson Orin modules balancing throughput and latency. "
+            "Uses a tuned YOLOv8s checkpoint with CUDA-friendly parameters."
+        ),
+        yolo_model="yolov8s.pt",
     ),
 }
 
 
-ADVISOR_MODEL_PROFILES: Dict[str, AdvisorModelProfile] = {
-    "light": AdvisorModelProfile(
-        key="light",
-        label="Light",
-        description="Fastest response for CPUs/Jetson Nano. Uses compact vision-language models.",
-        advisor_image_model="Salesforce/blip-image-captioning-base",
-        advisor_language_model="google/flan-t5-small",
+LANE_PROFILES: Dict[str, LaneProfile] = {
+    "precision": LaneProfile(
+        key="precision",
+        label="Precision",
+        description="Higher confidence threshold and heavier smoothing for slow, exact placement.",
+        min_confidence=0.45,
+        smoothing=0.8,
     ),
-    "normal": AdvisorModelProfile(
-        key="normal",
-        label="Normal",
-        description="Balanced cognition for laptops/Xavier class devices.",
-        advisor_image_model="Salesforce/blip-image-captioning-large",
-        advisor_language_model="google/flan-t5-base",
+    "balanced": LaneProfile(
+        key="balanced",
+        label="Balanced",
+        description="Default compromise used for mixed urban riding.",
+        min_confidence=0.35,
+        smoothing=0.6,
     ),
-    "heavy": AdvisorModelProfile(
-        key="heavy",
-        label="Heavy",
-        description="Richest narration and reasoning using larger language models (needs strong GPU).",
-        advisor_image_model="Salesforce/blip-image-captioning-large",
-        advisor_language_model="google/flan-t5-large",
+    "aggressive": LaneProfile(
+        key="aggressive",
+        label="Agile",
+        description="Lower confidence threshold with minimal smoothing for tight, twisty roads.",
+        min_confidence=0.25,
+        smoothing=0.4,
     ),
 }
 
@@ -99,10 +100,6 @@ DEPENDENCY_PROFILES: Dict[str, DependencyProfile] = {
             "opencv-python==4.8.0.76",
             "torch==2.0.1",
             "torchvision==0.15.2",
-            "transformers==4.36.0",
-            "accelerate==0.24.1",
-            "sentencepiece==0.1.99",
-            "safetensors==0.3.2",
             "psutil>=5.9.0",
         ],
     ),
@@ -115,10 +112,6 @@ DEPENDENCY_PROFILES: Dict[str, DependencyProfile] = {
             "opencv-python>=4.8.0",
             "torch>=2.1.0",
             "torchvision>=0.16.0",
-            "transformers>=4.37.0",
-            "accelerate>=0.25.0",
-            "sentencepiece>=0.1.99",
-            "safetensors>=0.3.1",
             "psutil>=5.9.0",
         ],
     ),
@@ -131,10 +124,6 @@ DEPENDENCY_PROFILES: Dict[str, DependencyProfile] = {
             "opencv-python==4.7.0.72",
             "torch==2.0.0",
             "torchvision==0.15.1",
-            "transformers==4.36.0",
-            "accelerate==0.24.1",
-            "sentencepiece==0.1.99",
-            "safetensors==0.3.1",
             "psutil>=5.9.0",
         ],
         pip_args=(
@@ -151,12 +140,7 @@ DEPENDENCY_PROFILES: Dict[str, DependencyProfile] = {
             "opencv-python>=4.8.0",
             "torch>=2.1.0",
             "torchvision>=0.16.0",
-            "transformers>=4.37.0",
-            "accelerate>=0.25.0",
-            "sentencepiece>=0.1.99",
-            "safetensors>=0.3.1",
             "psutil>=5.9.0",
-            "xformers>=0.0.23",
         ],
     ),
 }
@@ -190,7 +174,11 @@ def recommend_profiles(profile: HardwareProfile) -> tuple[ModelProfile, Dependen
     model_profile = DEFAULT_MODEL_BY_TIER.get(profile.compute_tier, MODEL_PROFILES["lightweight"])
 
     if profile.environment == "jetson":
-        model_profile = MODEL_PROFILES["standard"]
+        gpu_name = (profile.gpu_name or "").lower()
+        if "orin" in gpu_name:
+            model_profile = MODEL_PROFILES["jetson_orin"]
+        else:
+            model_profile = MODEL_PROFILES["standard"]
 
     dep_profile = DEPENDENCY_PROFILES["modern"]
     if profile.environment in DEFAULT_DEPENDENCIES_BY_ENVIRONMENT:
