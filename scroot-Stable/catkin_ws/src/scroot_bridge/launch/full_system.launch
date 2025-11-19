@@ -1,0 +1,5 @@
+<launch>
+  <include file="$(find sensor_interface)/launch/sensor_interface_dynamic.launch" />
+  <include file="$(find scooter_control)/launch/yolo.launch" />
+  <include file="$(find scroot_bridge)/launch/ai_input_bridge.launch" />
+</launch>
