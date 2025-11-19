@@ -30,6 +30,7 @@ from autonomy.perception.lane_detection import LaneDetector, LaneDetectorConfig
 from autonomy.perception.object_detection import ObjectDetector, ObjectDetectorConfig
 from autonomy.planning.navigator import Navigator, NavigatorConfig
 from autonomy.sensors.camera import CameraSensor
+from autonomy.sensors.lidar import LidarSensor
 from autonomy.utils.data_structures import (
     ActuatorCommand,
     ArbiterReview,
@@ -42,16 +43,31 @@ from autonomy.utils.data_structures import (
     PerceptionSummary,
     PilotTickData,
     SafetyCaps,
+    SensorSample,
+    LidarSnapshot,
     VehicleEnvelope,
 )
 
 
+def _runtime_input_dir() -> Path:
+    return Path.home() / "scroot" / "runtime_inputs"
+
+
+def _default_camera_source() -> Path:
+    return _runtime_input_dir() / "camera.jpg"
+
+
+def _default_lidar_source() -> Path:
+    return _runtime_input_dir() / "lidar.npy"
+
+
 @dataclass
 class PilotConfig:
-    camera_source: Union[int, str] = 0
+    camera_source: Union[int, str, Path] = field(default_factory=_default_camera_source)
     camera_width: int = 1280
     camera_height: int = 720
     camera_fps: int = 30
+    lidar_source: Path = field(default_factory=_default_lidar_source)
     model_name: str = "yolov8n.pt"
     confidence_threshold: float = 0.3
     iou_threshold: float = 0.4
@@ -76,6 +92,7 @@ class PilotConfig:
     calibration_reference_distance_m: float = 2.0
     calibration_reference_pixels: float = 220.0
     companion_enabled: bool = True
+    use_internal_sensors: bool = True
 
 
 class AutonomyPilot:
@@ -88,12 +105,16 @@ class AutonomyPilot:
     ) -> None:
         self.config = config or PilotConfig()
         self._tick_callback = tick_callback
-        self._camera = CameraSensor(
-            source=self.config.camera_source,
-            width=self.config.camera_width,
-            height=self.config.camera_height,
-            fps=self.config.camera_fps,
-        )
+        self._camera: Optional[CameraSensor] = None
+        self._lidar: Optional[LidarSensor] = None
+        if self.config.use_internal_sensors:
+            self._camera = CameraSensor(
+                source=self.config.camera_source,
+                width=self.config.camera_width,
+                height=self.config.camera_height,
+                fps=self.config.camera_fps,
+            )
+            self._lidar = LidarSensor(self.config.lidar_source)
         self._vehicle = VehicleEnvelope(
             width_m=self.config.vehicle_width_m,
             length_m=self.config.vehicle_length_m,
@@ -129,6 +150,7 @@ class AutonomyPilot:
         self._latest_subgoal: Optional[NavigationSubGoal] = None
         self._latest_companion: Optional[str] = None
         self._latest_lane: Optional[LaneEstimate] = None
+        self._latest_lidar: Optional[LidarSnapshot] = None
 
         if self.config.visualize or self.config.command_state_path:
             self.config.log_dir.mkdir(parents=True, exist_ok=True)
@@ -181,8 +203,16 @@ class AutonomyPilot:
     def latest_lane(self) -> Optional[LaneEstimate]:
         return self._latest_lane
 
+    @property
+    def latest_lidar(self) -> Optional[np.ndarray]:
+        return self._latest_lidar
+
     def run(self) -> Iterator[ActuatorCommand]:
         logging.info("Starting autonomous pilot loop")
+        if not self.config.use_internal_sensors or self._camera is None or self._lidar is None:
+            raise RuntimeError(
+                "PilotConfig.use_internal_sensors is False; feed SensorHub data via AutonomyPilot.process_sample()"
+            )
         self._running = True
         frame_iterator = self._camera.frames()
         for success, frame in frame_iterator:
@@ -192,109 +222,139 @@ class AutonomyPilot:
                 logging.warning("Failed to read frame from camera")
                 continue
 
-            current_command: Optional[HighLevelCommand] = None
-            if self._command_interface:
-                current_command = self._command_interface.poll()
+            lidar_snapshot: Optional[LidarSnapshot] = None
+            lidar_success, latest = self._lidar.read()
+            if lidar_success and latest is not None:
+                lidar_snapshot = latest
 
-            lane_estimate = self._lane_detector.analyze(frame)
-            self._latest_lane = lane_estimate
-
-            perception_summary = self._detector.detect(frame)
-            decision = self._navigator.plan(
-                perception_summary.objects,
-                perception_summary.frame_size,
-                current_command,
-                lane_estimate=lane_estimate,
-            )
-
-            if current_command and current_command.command_type == "stop":
-                decision = replace(decision, desired_speed=0.0, hazard_level=1.0, enforced_stop=True)
-
-            proposed_command = self._controller.command(decision)
-
-            scene_context = self._context_analyzer.analyze(decision)
-            caps = self._mindset.evaluate(scene_context.snapshot, decision)
-            has_goal = bool(current_command and current_command.command_type != "stop")
-            ambient_mode = self.config.navigation_intent.ambient_mode
-
-            tick_time = time.time()
-            arbitration = self._arbiter.step(
-                timestamp=tick_time,
-                perception_objects=perception_summary.objects,
-                decision=decision,
-                proposed=proposed_command,
-                context=scene_context.snapshot,
-                caps=caps,
-                has_goal=has_goal,
-                ambient_mode=ambient_mode,
-                subgoal_hint=scene_context.subgoal_hint,
-            )
-
-            command = arbitration.final_command
-            review = arbitration.review
-            companion_message = ""
-            if self._companion and review:
-                narrated = self._companion.narrate(review)
-                if narrated:
-                    companion_message = narrated
-
-            self._telemetry.record(
-                timestamp=tick_time,
-                decision=decision,
-                proposed=proposed_command,
-                result=command,
-                review=review,
-                caps=caps,
-                context=scene_context.snapshot,
-                gate_tags=arbitration.gate_tags,
-                subgoal=arbitration.subgoal,
-                companion_message=companion_message,
-            )
-
-            self._latest_decision = decision
-            self._latest_review = review
-            self._latest_context = scene_context.snapshot
-            self._latest_caps = caps
-            self._latest_subgoal = arbitration.subgoal
-            self._latest_companion = companion_message or None
-
-            overlay_frame = None
-            if self._tick_callback or self.config.visualize:
-                overlay_frame = self._compose_overlay(
-                    frame,
-                    perception_summary,
-                    decision,
-                    command,
-                    arbitration,
-                    caps,
-                    lane_estimate,
-                )
-
-            if self._tick_callback and overlay_frame is not None:
-                self._publish_tick(
-                    timestamp=tick_time,
-                    overlay=overlay_frame,
-                    command=command,
-                    review=review,
-                    decision=decision,
-                    context=scene_context.snapshot,
-                    caps=caps,
-                    gate_tags=arbitration.gate_tags,
-                    companion=companion_message,
-                )
-
-            if self.config.visualize and overlay_frame is not None:
-                self._visualize(overlay_frame)
-
-            self._export_command_state(current_command)
-
+            sample = SensorSample(frame=frame, timestamp=time.time(), lidar=lidar_snapshot)
+            command = self.process_sample(sample, command_override=None)
             yield command
 
         self._camera.close()
         logging.info("Pilot loop terminated")
 
+    def process_sample(
+        self,
+        sample: SensorSample,
+        *,
+        command_override: Optional[HighLevelCommand] = None,
+    ) -> ActuatorCommand:
+        if sample.frame is None:
+            raise ValueError("SensorSample.frame must contain an image")
+
+        if not self._running:
+            self._running = True
+
+        current_command = command_override
+        if current_command is None and self._command_interface:
+            current_command = self._command_interface.poll()
+
+        if sample.lidar is not None:
+            self._latest_lidar = sample.lidar
+
+        tick_time = sample.timestamp if sample.timestamp > 0 else time.time()
+        return self._process_tick(frame=sample.frame, current_command=current_command, tick_time=tick_time)
+
     def stop(self) -> None:
         self._running = False
+
+    def _process_tick(
+        self,
+        *,
+        frame: np.ndarray,
+        current_command: Optional[HighLevelCommand],
+        tick_time: float,
+    ) -> ActuatorCommand:
+        lane_estimate = self._lane_detector.analyze(frame)
+        self._latest_lane = lane_estimate
+
+        perception_summary = self._detector.detect(frame)
+        decision = self._navigator.plan(
+            perception_summary.objects,
+            perception_summary.frame_size,
+            current_command,
+            lane_estimate=None,
+        )
+
+        if current_command and current_command.command_type == "stop":
+            decision = replace(decision, desired_speed=0.0, hazard_level=1.0, enforced_stop=True)
+
+        proposed_command = self._controller.command(decision)
+
+        scene_context = self._context_analyzer.analyze(decision)
+        caps = self._mindset.evaluate(scene_context.snapshot, decision)
+        has_goal = bool(current_command and current_command.command_type != "stop")
+        ambient_mode = self.config.navigation_intent.ambient_mode
+
+        arbitration = self._arbiter.step(
+            timestamp=tick_time,
+            perception_objects=perception_summary.objects,
+            decision=decision,
+            proposed=proposed_command,
+            context=scene_context.snapshot,
+            caps=caps,
+            has_goal=has_goal,
+            ambient_mode=ambient_mode,
+            subgoal_hint=scene_context.subgoal_hint,
+        )
+
+        command = arbitration.final_command
+        review = arbitration.review
+        companion_message = ""
+        if self._companion and review:
+            narrated = self._companion.narrate(review)
+            if narrated:
+                companion_message = narrated
+
+        self._telemetry.record(
+            timestamp=tick_time,
+            decision=decision,
+            proposed=proposed_command,
+            result=command,
+            review=review,
+            caps=caps,
+            context=scene_context.snapshot,
+            gate_tags=arbitration.gate_tags,
+            subgoal=arbitration.subgoal,
+            companion_message=companion_message,
+        )
+
+        self._latest_decision = decision
+        self._latest_review = review
+        self._latest_context = scene_context.snapshot
+        self._latest_caps = caps
+        self._latest_subgoal = arbitration.subgoal
+        self._latest_companion = companion_message or None
+
+        overlay_frame = None
+        if self._tick_callback or self.config.visualize:
+            overlay_frame = self._compose_overlay(
+                frame,
+                perception_summary,
+                lane_estimate,
+            )
+
+        if self._tick_callback and overlay_frame is not None:
+            self._publish_tick(
+                timestamp=tick_time,
+                overlay=overlay_frame,
+                command=command,
+                review=review,
+                decision=decision,
+                context=scene_context.snapshot,
+                caps=caps,
+                gate_tags=arbitration.gate_tags,
+                companion=companion_message,
+                lidar=self._latest_lidar,
+            )
+
+        if self.config.visualize and overlay_frame is not None:
+            self._visualize(overlay_frame)
+
+        self._export_command_state(current_command)
+
+        return command
 
     def _export_command_state(
         self,
@@ -307,93 +367,28 @@ class AutonomyPilot:
         self,
         frame: np.ndarray,
         perception: PerceptionSummary,
-        decision: NavigationDecision,
-        command: ActuatorCommand,
-        arbitration,
-        caps: SafetyCaps,
         lane_estimate: Optional[LaneEstimate],
     ) -> np.ndarray:
+        """Render perception overlays while keeping the raw camera feed untouched."""
+
         overlay = frame.copy()
         overlay = self._detector.draw_detections(overlay, perception.objects)
-        height, width = overlay.shape[:2]
-        base_y = height - 20
-        path_length = max(40, int(height * 0.45))
-        steer_offset = int(command.steer * width * 0.25)
-        half_span = max(20, int(width * 0.12))
-        top_y = max(20, base_y - path_length)
-        center_x = width // 2
 
-        cv2.line(overlay, (center_x, base_y), (center_x + steer_offset, top_y), (255, 255, 0), 3)
-        cv2.line(
-            overlay,
-            (center_x - half_span, base_y),
-            (center_x - half_span + steer_offset, top_y),
-            (0, 255, 0),
-            2,
-        )
-        cv2.line(
-            overlay,
-            (center_x + half_span, base_y),
-            (center_x + half_span + steer_offset, top_y),
-            (0, 255, 0),
-            2,
-        )
+        if not lane_estimate:
+            return overlay
 
-        bar_height = max(50, int(height * 0.2))
-        bar_width = max(14, int(width * 0.025))
-        throttle_x = 20
-        throttle_y_top = base_y - bar_height
-        throttle_level = int(bar_height * max(0.0, min(1.0, command.throttle)))
-        throttle_fill_top = base_y - throttle_level
-        cv2.rectangle(overlay, (throttle_x, throttle_y_top), (throttle_x + bar_width, base_y), (70, 70, 70), 2)
-        cv2.rectangle(
-            overlay,
-            (throttle_x + 2, throttle_fill_top),
-            (throttle_x + bar_width - 2, base_y - 2),
-            (40, 200, 40),
-            -1,
-        )
-        cv2.putText(
-            overlay,
-            "TH",
-            (throttle_x, throttle_y_top - 6),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            1,
-        )
+        lane_layer = np.zeros_like(overlay)
 
-        brake_x = throttle_x + bar_width + 16
-        brake_y_top = base_y - bar_height
-        brake_level = int(bar_height * max(0.0, min(1.0, command.brake)))
-        brake_fill_top = base_y - brake_level
-        cv2.rectangle(overlay, (brake_x, brake_y_top), (brake_x + bar_width, base_y), (70, 70, 70), 2)
-        cv2.rectangle(
-            overlay,
-            (brake_x + 2, brake_fill_top),
-            (brake_x + bar_width - 2, base_y - 2),
-            (20, 20, 220),
-            -1,
-        )
-        cv2.putText(
-            overlay,
-            "BR",
-            (brake_x, brake_y_top - 6),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            1,
-        )
+        if lane_estimate.lane_area:
+            cv2.fillPoly(lane_layer, [np.array(lane_estimate.lane_area)], (40, 200, 220))
+            overlay = cv2.addWeighted(overlay, 1.0, lane_layer, 0.35, 0)
 
-        if lane_estimate:
-            if lane_estimate.lane_area:
-                lane_layer = np.zeros_like(overlay)
-                cv2.fillPoly(lane_layer, [np.array(lane_estimate.lane_area)], (40, 200, 220))
-                overlay = cv2.addWeighted(overlay, 1.0, lane_layer, 0.35, 0)
-            if lane_estimate.points_left:
-                cv2.polylines(overlay, [np.array(lane_estimate.points_left)], False, (255, 215, 0), 2)
-            if lane_estimate.points_right:
-                cv2.polylines(overlay, [np.array(lane_estimate.points_right)], False, (0, 191, 255), 2)
+        if lane_estimate.points_left:
+            cv2.polylines(overlay, [np.array(lane_estimate.points_left)], False, (255, 215, 0), 2)
+        if lane_estimate.points_right:
+            cv2.polylines(overlay, [np.array(lane_estimate.points_right)], False, (0, 191, 255), 2)
+
+        if lane_estimate.points_left and lane_estimate.points_right:
             center_path = []
             for left_pt, right_pt in zip(lane_estimate.points_left, lane_estimate.points_right):
                 cx = int((left_pt[0] + right_pt[0]) / 2)
@@ -402,94 +397,33 @@ class AutonomyPilot:
             if center_path:
                 cv2.polylines(overlay, [np.array(center_path)], False, (102, 255, 102), 2)
 
-            if lane_estimate.birdseye_outline:
-                inset_height = max(80, height // 5)
-                inset_width = max(80, width // 6)
-                inset = np.zeros((inset_height, inset_width, 3), dtype=np.uint8)
-                bev_array = np.array(lane_estimate.birdseye_outline, dtype=np.float32)
-                max_x = max(1.0, float(np.max(bev_array[:, 0])))
-                max_y = max(1.0, float(np.max(bev_array[:, 1])))
-                scale_x = inset_width / max_x
-                scale_y = inset_height / max_y
-                bev_scaled = np.array(
-                    [
-                        (
-                            int(pt[0] * scale_x),
-                            int(inset_height - 1 - pt[1] * scale_y),
-                        )
-                        for pt in lane_estimate.birdseye_outline
-                    ]
-                )
-                if bev_scaled.size:
-                    cv2.fillPoly(inset, [bev_scaled], (0, 120, 180))
-                    cv2.polylines(inset, [bev_scaled], True, (0, 255, 180), 1)
-                    inset_x = width - inset_width - 12
-                    inset_y = 12
-                    roi = overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width]
-                    blended = cv2.addWeighted(roi, 0.65, inset, 0.35, 0)
-                    overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width] = blended
-
-        review = getattr(arbitration, "review", None)
-        if review:
-            color_map = {
-                ArbiterVerdict.ALLOW: (60, 160, 60),
-                ArbiterVerdict.AMEND: (0, 165, 255),
-                ArbiterVerdict.BLOCK: (0, 0, 255),
-            }
-            header = overlay.copy()
-            cv2.rectangle(header, (0, 0), (width, 70), color_map.get(review.verdict, (90, 90, 90)), -1)
-            overlay = cv2.addWeighted(header, 0.3, overlay, 0.7, 0)
-            summary = f"{review.verdict.value}: {', '.join(review.reason_tags)}"
-            cv2.putText(
-                overlay,
-                summary,
-                (12, 36),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
+        if lane_estimate.birdseye_outline:
+            height, width = overlay.shape[:2]
+            inset_height = max(80, height // 5)
+            inset_width = max(80, width // 6)
+            inset = np.zeros((inset_height, inset_width, 3), dtype=np.uint8)
+            bev_array = np.array(lane_estimate.birdseye_outline, dtype=np.float32)
+            max_x = max(1.0, float(np.max(bev_array[:, 0])))
+            max_y = max(1.0, float(np.max(bev_array[:, 1])))
+            scale_x = inset_width / max_x
+            scale_y = inset_height / max_y
+            bev_scaled = np.array(
+                [
+                    (
+                        int(pt[0] * scale_x),
+                        int(inset_height - 1 - pt[1] * scale_y),
+                    )
+                    for pt in lane_estimate.birdseye_outline
+                ]
             )
-            cv2.putText(
-                overlay,
-                f"Latency {review.latency_ms:.1f} ms",
-                (12, 62),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (240, 240, 240),
-                1,
-            )
-
-        info_lines = [
-            f"Steer {command.steer:+.2f}",
-            f"Throttle {command.throttle:.2f} Brake {command.brake:.2f}",
-            f"Desired {decision.desired_speed:.1f} m/s",
-        ]
-        if decision.goal_context:
-            info_lines.append(f"Goal {decision.goal_context}")
-        if caps and caps.active:
-            info_lines.append(
-                f"Caps {caps.source}: ≤{caps.max_speed_mps:.1f}m/s, ≥{caps.min_clearance_m:.1f}m"
-            )
-        if lane_estimate:
-            info_lines.append(
-                f"Lane {lane_estimate.lane_type} conf={lane_estimate.confidence:.2f} off={lane_estimate.lateral_offset_m:+.2f}m"
-            )
-            if lane_estimate.curvature_m:
-                info_lines.append(f"Curvature ~{lane_estimate.curvature_m:.0f} m")
-        gate_tags = getattr(arbitration, "gate_tags", ())
-        if gate_tags:
-            info_lines.append("Gate " + ", ".join(gate_tags))
-
-        for idx, text in enumerate(info_lines):
-            cv2.putText(
-                overlay,
-                text,
-                (throttle_x + 2 * bar_width + 40, 30 + idx * 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-            )
+            if bev_scaled.size:
+                cv2.fillPoly(inset, [bev_scaled], (0, 120, 180))
+                cv2.polylines(inset, [bev_scaled], True, (0, 255, 180), 1)
+                inset_x = width - inset_width - 12
+                inset_y = 12
+                roi = overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width]
+                blended = cv2.addWeighted(roi, 0.65, inset, 0.35, 0)
+                overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width] = blended
 
         return overlay
 
@@ -510,10 +444,22 @@ class AutonomyPilot:
         caps: SafetyCaps,
         gate_tags: tuple[str, ...],
         companion: Optional[str],
+        lidar: Optional[LidarSnapshot],
     ) -> None:
         if not self._tick_callback:
             return
         try:
+            lidar_copy = None
+            if lidar is not None:
+                lidar_copy = LidarSnapshot(
+                    ranges=lidar.ranges.copy(),
+                    angle_min=lidar.angle_min,
+                    angle_max=lidar.angle_max,
+                    angle_increment=lidar.angle_increment,
+                    stamp=lidar.stamp,
+                    imu_vector=lidar.imu_vector,
+                    ultrasonic_distance=lidar.ultrasonic_distance,
+                )
             packet = PilotTickData(
                 timestamp=timestamp,
                 overlay=overlay.copy(),
@@ -524,6 +470,7 @@ class AutonomyPilot:
                 caps=caps,
                 gate_tags=gate_tags,
                 companion=companion,
+                lidar=lidar_copy,
             )
             self._tick_callback(packet)
         except Exception:  # pragma: no cover - defensive logging
@@ -593,7 +540,11 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
     import argparse
 
     parser = argparse.ArgumentParser(description="Autonomous scooter pilot")
-    parser.add_argument("--camera", default=0, help="Camera source index or path")
+    parser.add_argument(
+        "--camera",
+        default=str(_default_camera_source()),
+        help="Camera source index or path (defaults to runtime_inputs/camera.jpg)",
+    )
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=30)
@@ -683,11 +634,14 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
         lane_detector.min_confidence = 0.25
         lane_detector.smoothing = 0.4
 
+    lidar_path = Path(args.lidar).expanduser()
+
     return PilotConfig(
         camera_source=args.camera,
         camera_width=args.width,
         camera_height=args.height,
         camera_fps=args.fps,
+        lidar_source=lidar_path,
         model_name=args.model,
         confidence_threshold=args.confidence,
         iou_threshold=args.iou,

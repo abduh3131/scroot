@@ -1,56 +1,76 @@
 from __future__ import annotations
 
+import logging
 import time
+from pathlib import Path
 from typing import Iterator, Optional, Union
 
 import cv2
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class CameraSensor:
-    """Wraps OpenCV capture with sensible defaults for autonomous operation."""
+    """Polls a runtime camera image exported by the ROS bridge."""
 
     def __init__(
         self,
-        source: Union[int, str] = 0,
+        source: Union[int, str, Path] = 0,
         width: int = 1280,
         height: int = 720,
         fps: int = 30,
         auto_reconnect: bool = True,
     ) -> None:
-        self.source = source
+        del auto_reconnect  # maintained for compatibility with old signatures
         self.width = width
         self.height = height
-        self.fps = fps
-        self.auto_reconnect = auto_reconnect
-        self._capture: Optional[cv2.VideoCapture] = None
+        self.fps = max(1, fps)
+        self._poll_interval = 1.0 / float(self.fps)
+        self._failure_log_interval = 1.0
+        self._last_failure_log = 0.0
+        self._last_failure_yield = 0.0
 
-    def _open(self) -> cv2.VideoCapture:
-        capture = cv2.VideoCapture(self.source)
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        capture.set(cv2.CAP_PROP_FPS, self.fps)
-        if not capture.isOpened():
-            raise RuntimeError(f"Unable to open camera source {self.source}")
-        return capture
+        if isinstance(source, (int, float)):
+            raise ValueError(
+                "CameraSensor no longer opens hardware devices directly. "
+                "Point it at the runtime snapshot written by ai_input_bridge."
+            )
+
+        path = Path(str(source)).expanduser()
+        self._image_path = path
+        self._image_path.parent.mkdir(parents=True, exist_ok=True)
+        self.source = str(path)
 
     def frames(self) -> Iterator[tuple[bool, Optional[cv2.Mat]]]:
-        frame_interval = 1.0 / float(self.fps)
         while True:
-            if self._capture is None:
-                self._capture = self._open()
-            success, frame = self._capture.read()
-            if not success:
-                if not self.auto_reconnect:
-                    yield success, None
-                    break
-                self._capture.release()
-                self._capture = None
-                time.sleep(0.1)
+            frame = None
+            if self._image_path.exists():
+                frame = cv2.imread(str(self._image_path))
+            if frame is None:
+                self._throttled_warning(
+                    f"Waiting for camera file at {self._image_path} to be populated"
+                )
+                if self._should_emit_failure():
+                    yield False, None
+                time.sleep(self._poll_interval)
                 continue
-            yield success, frame
-            time.sleep(frame_interval)
+            yield True, frame
+            time.sleep(self._poll_interval)
+
+    def _should_emit_failure(self) -> bool:
+        now = time.monotonic()
+        if now - self._last_failure_yield >= self._failure_log_interval:
+            self._last_failure_yield = now
+            return True
+        return False
+
+    def _throttled_warning(self, message: str) -> None:
+        now = time.monotonic()
+        if now - self._last_failure_log >= self._failure_log_interval:
+            self._last_failure_log = now
+            LOGGER.warning(message)
 
     def close(self) -> None:
-        if self._capture is not None:
-            self._capture.release()
-            self._capture = None
+        # No hardware handles to release when mirroring files.
+        return
