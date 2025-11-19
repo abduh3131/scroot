@@ -30,7 +30,31 @@ from autonomy.app.state import AppState, AppStateManager, DEFAULT_LANE_SRC_POINT
 from autonomy.control.config import NavigationIntentConfig, SafetyMindsetConfig
 from autonomy.pilot import AutonomyPilot, PilotConfig
 from autonomy.perception.lane_detection import LaneDetectorConfig
-from autonomy.utils.data_structures import PilotTickData
+from autonomy.utils.data_structures import LidarSnapshot, PilotTickData
+
+
+def summarize_lidar_ranges(snapshot: Optional[LidarSnapshot]) -> tuple[str, Optional[float], Optional[float]]:
+    """Return LiDAR summary text, closest hit, and ultrasonic reading."""
+
+    if snapshot is None:
+        return "n/a", None, None
+    ranges = snapshot.ranges
+    try:
+        values = np.asarray(ranges, dtype=np.float32).reshape(-1)
+    except Exception:
+        return "n/a", None, snapshot.ultrasonic_distance
+    if values.size == 0:
+        return "n/a", None, snapshot.ultrasonic_distance
+    mask = np.isfinite(values) & (values > 0.0)
+    if not np.any(mask):
+        return "n/a", None, snapshot.ultrasonic_distance
+    filtered = values[mask]
+    closest = float(np.min(filtered))
+    median = float(np.median(filtered))
+    summary = f"{closest:.2f} m min | {median:.2f} m med"
+    if snapshot.ultrasonic_distance is not None and snapshot.ultrasonic_distance > 0.0:
+        summary += f" | US {snapshot.ultrasonic_distance:.2f} m"
+    return summary, closest, snapshot.ultrasonic_distance
 
 
 ACCELERATION_CHOICES = ["auto", "cpu", "cuda", "quadro_p520"]
@@ -97,6 +121,13 @@ class PilotRunner(threading.Thread):
                     line += f" goal={goal}"
                 if lane_status:
                     line += lane_status
+                lidar_summary, _, ultrasonic = summarize_lidar_ranges(
+                    self._pilot.latest_lidar if self._pilot else None
+                )
+                if lidar_summary != "n/a":
+                    line += f" lidar={lidar_summary}"
+                if ultrasonic and ultrasonic > 0.0:
+                    line += f" us={ultrasonic:.2f}m"
                 if review:
                     line += f" arbiter={review.verdict.value}"
                     if review.reason_tags:
@@ -321,6 +352,7 @@ class ScooterApp(tk.Tk):
         self._last_arbiter_verdict: str = ""
         self._last_lane_summary: str = ""
         self._last_companion: str = ""
+        self._last_lidar_summary: str = ""
 
         self.lane_point_vars: list[tuple[tk.DoubleVar, tk.DoubleVar]] = []
 
@@ -669,9 +701,17 @@ class ScooterApp(tk.Tk):
         self.arbiter_status = tk.StringVar(value="Idle")
         ttk.Label(telemetry_frame, textvariable=self.arbiter_status, width=18).grid(row=1, column=3, sticky="w")
 
-        ttk.Label(telemetry_frame, text="Lane Status").grid(row=1, column=0, sticky="w")
+        ttk.Label(telemetry_frame, text="Lane Status").grid(row=2, column=0, sticky="w")
         self.lane_status = tk.StringVar(value="n/a")
-        ttk.Label(telemetry_frame, textvariable=self.lane_status, width=18).grid(row=1, column=1, sticky="w")
+        ttk.Label(telemetry_frame, textvariable=self.lane_status, width=18).grid(row=2, column=1, sticky="w")
+
+        ttk.Label(telemetry_frame, text="LiDAR (closest | median | ultrasonic)").grid(
+            row=2, column=2, sticky="w"
+        )
+        self.lidar_status = tk.StringVar(value="n/a")
+        ttk.Label(telemetry_frame, textvariable=self.lidar_status, width=32).grid(
+            row=2, column=3, sticky="w"
+        )
 
         self.message_frame = ttk.LabelFrame(self.run_frame, text="Command Console")
         self.message_frame.grid(row=14, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
@@ -1110,6 +1150,9 @@ class ScooterApp(tk.Tk):
             offset = meta.get("lane_offset_m") if isinstance(meta, dict) else None
             if isinstance(conf, (float, int)) and isinstance(offset, (float, int)):
                 summary += f"\nLane conf={float(conf):.2f} off={float(offset):+.2f}m"
+            lidar_text, _, _ = summarize_lidar_ranges(payload.lidar)
+            if lidar_text != "n/a":
+                summary += f"\nLiDAR {lidar_text}"
             self.test_preview_label.configure(image=self._media_test_photo, text=summary, compound=tk.TOP)
 
         self.after(0, update)
@@ -1408,6 +1451,15 @@ class ScooterApp(tk.Tk):
             else:
                 self._last_lane_summary = ""
             self.lane_status.set(lane_text)
+
+            lidar_text, _, _ = summarize_lidar_ranges(payload.lidar)
+            self.lidar_status.set(lidar_text)
+            if lidar_text != "n/a":
+                if lidar_text != self._last_lidar_summary:
+                    self._append_message(f"LiDAR: {lidar_text}")
+                    self._last_lidar_summary = lidar_text
+            else:
+                self._last_lidar_summary = ""
 
             if payload.review:
                 reason = ", ".join(payload.review.reason_tags)

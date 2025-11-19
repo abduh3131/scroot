@@ -12,6 +12,7 @@ from autonomy.app.profiles import DependencyProfile, ModelProfile
 
 APP_STATE_PATH = Path("config") / "app_state.json"
 HARDWARE_CACHE_PATH = Path("config") / "hardware_profile.json"
+RUNTIME_CAMERA_DEFAULT = str((Path.home() / "scroot" / "runtime_inputs" / "camera.jpg"))
 
 DEFAULT_LANE_SRC_POINTS: Tuple[Tuple[float, float], ...] = (
     (0.12, 1.0),
@@ -56,7 +57,7 @@ class AppState:
             model_profile=model_profile.key,
             dependency_profile=dependency_profile.key,
             lane_profile="balanced",
-            camera_source="0",
+            camera_source=RUNTIME_CAMERA_DEFAULT,
             resolution_width=1280,
             resolution_height=720,
             fps=30,
@@ -96,6 +97,7 @@ class AppStateManager:
         data.pop("enable_advisor", None)
         data.pop("advisor_mode", None)
         data.setdefault("lane_profile", "balanced")
+        data.setdefault("camera_source", RUNTIME_CAMERA_DEFAULT)
         data.setdefault("safety_mindset", "off")
         data.setdefault("ambient_mode", "on")
         data.setdefault("persona", "calm_safe")

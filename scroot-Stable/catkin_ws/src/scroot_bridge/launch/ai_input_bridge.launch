@@ -1,0 +1,20 @@
+<launch>
+  <arg name="model" default="yolov8n.pt" />
+  <arg name="confidence" default="0.3" />
+  <arg name="iou" default="0.4" />
+  <arg name="device" default="auto" />
+  <arg name="visualize" default="false" />
+  <arg name="mirror_runtime" default="true" />
+  <arg name="runtime_dir" default="~/scroot/runtime_inputs" />
+  <arg name="log_interval" default="1.0" />
+  <node pkg="scroot_bridge" type="ai_input_bridge.py" name="ai_input_bridge" output="screen">
+    <param name="model" value="$(arg model)" />
+    <param name="confidence" value="$(arg confidence)" />
+    <param name="iou" value="$(arg iou)" />
+    <param name="device" value="$(arg device)" />
+    <param name="visualize" value="$(arg visualize)" />
+    <param name="mirror_runtime_inputs" value="$(arg mirror_runtime)" />
+    <param name="runtime_dir" value="$(arg runtime_dir)" />
+    <param name="log_interval" value="$(arg log_interval)" />
+  </node>
+</launch>
