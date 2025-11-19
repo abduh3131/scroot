@@ -15,6 +15,37 @@ The scooter autonomy stack now runs on Python 3.8 and newer, spans Jetson Orin t
 9. **Documentation Refresh** – README, GUI guide, and this report now describe the new toggles, calibration workflow, overlay-only lane detector, and offline replay flow in approachable language.
 10. **SensorHub ROS Bridge + Runtime Inputs** – `scroot/bridge/ros_sensor_bridge.py` subscribes to `/sensor_hub/data`, converts the fused camera frame via `CvBridge`, exports LiDAR ranges to `runtime_inputs/lidar.npy`, throttles logs to once per second, and the pilot consumes those files through the updated camera and LiDAR sensor wrappers.
 
+## GUI + Sensor Interface Workflow
+Follow these steps whenever you want the desktop GUI to stay in lock-step with the fused `/sensor_hub/data` feed from the `sensor_interface_node`:
+
+1. **Bring the ROS sensor interface online**
+   ```bash
+   roslaunch sensor_interface sensor_interface_dynamic.launch
+   ```
+   This node publishes `sensor_interface/msg/SensorHub` messages that contain both the fused camera frame and LiDAR ranges.
+
+2. **Mirror ROS data into runtime inputs**
+   ```bash
+   ./scroot/bridge/ros_sensor_bridge.py
+   ```
+   The bridge initializes the `ai_input_bridge` ROS node, subscribes to `/sensor_hub/data`, converts the camera image with `CvBridge`, converts the LiDAR ranges into a NumPy array, and writes the synchronized snapshots to `~/scroot/runtime_inputs/camera.jpg` and `~/scroot/runtime_inputs/lidar.npy`. The directory is auto-created, logs are throttled to one line per second, and status updates mention the timestamp of the most recent export so you know data is flowing.
+
+3. **Launch the GUI against the runtime inputs**
+   ```bash
+   python3 scroot/scooter_app.py
+   ```
+   The Launch tab’s default camera source already points to `~/scroot/runtime_inputs/camera.jpg`, and the autonomy core now instantiates a `LidarSensor` that reads `~/scroot/runtime_inputs/lidar.npy`. With the bridge running, pressing **Start Pilot** in the GUI immediately consumes the mirrored frames/ranges without touching USB cameras or local LiDAR drivers.
+
+4. **Monitor health from the Launch tab**
+   - The Live Feed panel updates as soon as new `.jpg` snapshots arrive. If it freezes, check the bridge log for ROS or file permission issues.
+   - The Launch Log includes explicit lines whenever the pilot loads the latest LiDAR snapshot. If you see repeated `FileNotFoundError` entries, make sure the bridge is still running and writing into `~/scroot/runtime_inputs/`.
+
+5. **Shut down cleanly**
+   - Click **Stop Pilot** in the GUI before closing the app so telemetry and narration logs flush.
+   - Terminate `ros_sensor_bridge.py` with `Ctrl+C`, then stop the ROS launch file. This order prevents dangling writers from holding the runtime files open when you’re done.
+
+With this flow, the GUI, CLI (`python3 scroot/main.py`), and Media Test harness all share the exact same fused sensor snapshots, ensuring consistent perception/planning behavior regardless of whether you are driving live, replaying logs, or developing new features.
+
 ## Media Testing Workflow
 1. Open the **Media Test** tab after setting up your launch preferences (camera resolution, lane profile, mindset, persona).
 2. Use **Browse** to pick any road video or still photo. Images are treated as a short clip so the overlay renderer still produces a video file.
