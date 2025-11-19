@@ -1,0 +1,3 @@
+<launch>
+    <node name="rplidar_starter" pkg="sensor_interface" type="start_rplidar.py" output="screen" />
+</launch>

@@ -1,0 +1,42 @@
+<launch>
+    <!-- Simplified launch file with hardcoded, verified sensor parameters -->
+    <param name="use_sim_time" value="false" />
+
+    <!-- ======================= LiDAR Driver ======================= -->
+    <!-- RPLidar S2 Node - Port: /dev/ttyUSB2, Baud: 1000000 -->
+    <node name="rplidarNode" pkg="rplidar_ros" type="rplidarNode" output="screen" respawn="true" launch-prefix="bash -c 'sleep 2; $0 $@' ">
+        <param name="serial_port" type="string" value="/dev/ttyUSB0"/>
+        <param name="serial_baudrate" type="int" value="1000000"/>
+        <param name="frame_id" type="string" value="laser_link"/>
+        <param name="inverted" type="bool" value="false"/>
+        <param name="angle_compensate" type="bool" value="true"/>
+    </node>
+
+    <!-- ======================= USB Camera Node ======================= -->
+    <!-- Camera - Port: /dev/video0 -->
+    <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen" respawn="true">
+        <param name="video_device"  value="/dev/video0" />
+        <param name="image_width"   value="640" />
+        <param name="image_height"  value="480" />
+        <param name="pixel_format"  value="yuyv" />
+        <param name="io_method"     value="mmap" />
+        <param name="framerate"     value="30" />
+        <param name="camera_frame_id" value="webcam_link"/>
+    </node>
+
+    <!-- ======================= Fusion Node ======================= -->
+    <!-- Sensor Interface Node -->
+<node name="sensor_interface_node" pkg="sensor_interface" type="sensor_interface_node.py"
+      output="screen" respawn="true">
+    <remap from="lidar_input" to="/scan" />
+    <remap from="camera_input" to="/usb_cam/image_raw" />
+</node>
+
+    <!-- ======================= Static Transforms ======================= -->
+    <node pkg="tf" type="static_transform_publisher" name="base_to_laser_broadcaster"
+          args="0 0 0 0 0 0 base_link laser_link 100" />
+
+    <node pkg="tf" type="static_transform_publisher" name="base_to_camera_broadcaster"
+          args="0 0 0 0 0 0 base_link webcam_link 100" />
+
+</launch>

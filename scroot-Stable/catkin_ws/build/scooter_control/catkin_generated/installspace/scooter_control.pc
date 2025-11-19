@@ -1,0 +1,8 @@
+prefix=/home/jetson/catkin_ws/install
+
+Name: scooter_control
+Description: Description of scooter_control
+Version: 0.1.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib 
+Requires: rospy std_msgs sensor_msgs geometry_msgs message_runtime

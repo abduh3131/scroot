@@ -1,0 +1,49 @@
+<launch>
+    <!--
+        ROS Launch file for the Sensor Interface package.
+        This file launches the necessary sensor drivers and the sensor_interface_node.
+    -->
+
+    <!-- RPLiDAR Node -->
+    <!--
+        This includes the launch file for the RPLiDAR sensor.
+        Ensure that the 'rplidar_ros' package is installed and sourced.
+        The default topic is /scan, which we remap to /lidar/scan.
+    -->
+    <include file="$(find rplidar_ros)/launch/rplidar.launch">
+        <remap from="/scan" to="/lidar/scan" />
+    </include>
+
+    <!-- USB Camera Node -->
+    <!--
+        This launches the usb_cam node for a standard USB camera.
+        Ensure that the 'usb_cam' package is installed and sourced.
+        The default topic is /usb_cam/image_raw, which we remap to /camera/image_raw.
+    -->
+    <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen">
+        <param name="video_device" value="/dev/video0" />
+        <param name="image_width" value="640" />
+        <param name="image_height" value="480" />
+        <param name="pixel_format" value="yuyv" />
+        <param name="camera_frame_id" value="usb_cam" />
+        <param name="io_method" value="mmap"/>
+        <remap from="/usb_cam/image_raw" to="/camera/image_raw" />
+    </node>
+
+    <!-- Sensor Interface Node -->
+    <!--
+        This is the main node of the package that subscribes to the sensor topics,
+        synchronizes them, and publishes the fused SensorHub message.
+    -->
+    <node name="sensor_interface_node" pkg="sensor_interface" type="sensor_interface_node.py" output="screen">
+        <remap from="lidar_input" to="/lidar/scan" />
+        <remap from="camera_input" to="/camera/image_raw" />
+        <!--
+            Set the following parameters to 'true' if you have these sensors connected
+            and want to include their data in the fused message.
+        -->
+        <param name="use_ultrasonic" value="false" />
+        <param name="use_imu" value="false" />
+    </node>
+
+</launch>

@@ -1,0 +1,8 @@
+prefix=/home/jetson/catkin_ws/devel
+
+Name: sensor_interface
+Description: Description of sensor_interface
+Version: 0.1.0
+Cflags: -I/home/jetson/catkin_ws/devel/include
+Libs: -L${prefix}/lib 
+Requires: rospy std_msgs sensor_msgs geometry_msgs message_filters message_runtime

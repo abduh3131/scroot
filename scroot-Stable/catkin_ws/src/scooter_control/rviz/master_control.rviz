@@ -1,0 +1,98 @@
+<?xml version="1.0" ?>
+<rviz>
+  <display>
+    <name>Root</name>
+    <value>true</value>
+  </display>
+  <display>
+    <name>TF</name>
+    <value>true</value>
+    <class_id>rviz/TF</class_id>
+    <type>rviz/TF</type>
+    <color_fixed>0.9803921699523926</color_fixed>
+    <color_variable>0.20000000298023224</color_variable>
+    <frame_show_name>true</frame_show_name>
+    <frame_show_axes>true</frame_show_axes>
+    <frame_show_label>true</frame_show_label>
+    <frame_alpha>1</frame_alpha>
+    <frame_axis_length>0.5</frame_axis_length>
+    <frame_arrow_radius>0.05</frame_arrow_radius>
+    <update_rate>30</update_rate>
+  </display>
+  <display>
+    <name>LaserScan</name>
+    <value>true</value>
+    <class_id>rviz/LaserScan</class_id>
+    <type>rviz/LaserScan</type>
+    <topic>/lidar/scan</topic>
+    <color>0;255;0</color>
+    <alpha>1</alpha>
+    <decay_time>0.5</decay_time>
+    <size>0.05</size>
+    <style>Points</style>
+    <use_intensity>false</use_intensity>
+    <fixed_frame>base_link</fixed_frame>
+  </display>
+  <display>
+    <name>Raw Camera Image</name>
+    <value>true</value>
+    <class_id>rviz/Image</class_id>
+    <type>rviz/Image</type>
+    <topic>/usb_cam/image_raw</topic>
+    <queue_size>2</queue_size>
+    <transport_hint>raw</transport_hint>
+    <fixed_frame>base_link</fixed_frame>
+  </display>
+  <display>
+    <name>Fused Debug Image</name>
+    <value>true</value>
+    <class_id>rviz/Image</class_id>
+    <type>rviz/Image</type>
+    <topic>/sensor_hub/fused_image</topic>
+    <queue_size>2</queue_size>
+    <transport_hint>raw</transport_hint>
+    <fixed_frame>base_link</fixed_frame>
+  </display>
+  <display>
+    <name>YOLO Annotated Image</name>
+    <value>true</value>
+    <class_id>rviz/Image</class_id>
+    <type>rviz/Image</type>
+    <topic>/AI/annotated_image</topic>
+    <queue_size>2</queue_size>
+    <transport_hint>raw</transport_hint>
+    <fixed_frame>base_link</fixed_frame>
+  </display>
+  <display>
+    <name>YOLO Detections</name>
+    <value>true</value>
+    <class_id>rviz/MarkerArray</class_id>
+    <type>rviz/MarkerArray</type>
+    <topic>/AI/detections_markers</topic> <!-- Assuming a node publishes markers for detections -->
+    <queue_size>100</queue_size>
+    <fixed_frame>base_link</fixed_frame>
+  </display>
+  <global_options>
+    <fixed_frame>base_link</fixed_frame>
+    <background_color>48;48;48</background_color>
+    <frame_rate>30</frame_rate>
+  </global_options>
+  <panels>
+    <display_manager>
+      <class_id>rviz/Displays</class_id>
+      <type>rviz/Displays</type>
+      <property_widget_type>rviz/PropertyWidget</property_widget_type>
+      <collapsed>false</collapsed>
+      <properties>
+        <property name="Displays" value="true">
+          <property name="TF" value="true"/>
+          <property name="LaserScan" value="true"/>
+          <property name="Raw Camera Image" value="true"/>
+          <property name="Fused Debug Image" value="true"/>
+          <property name="YOLO Annotated Image" value="true"/>
+          <property name="YOLO Detections" value="true"/>
+        </property>
+      </properties>
+    </display_manager>
+  </panels>
+</rviz>
