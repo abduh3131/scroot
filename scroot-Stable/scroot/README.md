@@ -8,14 +8,14 @@ This package contains a self-contained autonomous driving stack tailored for lig
 - Real-time object detection powered by Ultralytics YOLO models (default: `yolov8n.pt`).
 - Hybrid navigation that fuses obstacle density analysis with natural-language operator goals.
 - Layered arbitration stack (Navigator → Arbiter → SafetyGate) that can ALLOW, AMEND, or BLOCK commands every control tick.
-- Optional safety mindset profiles that cap maximum speed / clearance and adapt to lane uncertainty or sensor degradation.
+- Optional safety mindset profiles that cap maximum speed / clearance and adapt to perception uncertainty or sensor degradation.
 - Vehicle envelope modeling with user-defined dimensions and camera calibration to keep commands within real clearance limits.
 - Riding companion narration that explains each arbiter decision without blocking the control loop.
-- Advanced bird’s-eye lane detector (mirrors openpilot’s lateral planner) that equalizes lighting, uses a fixed downward-tilted perspective warp tuned for scooter cameras, and feeds curvature/offset data straight back into the pilot.
-- Lane-aware navigator that blends those lane offsets back into the steering bias so the pilot recenters inside bike lanes or shoulders automatically.
+- Advanced bird’s-eye lane detector (mirrors openpilot’s lateral planner) that equalizes lighting, uses a fixed downward-tilted perspective warp tuned for scooter cameras, and only renders a translucent overlay when it actually sees a lane.
+- Lane visualization is purely cosmetic—the AI handles steering/throttle/brake without any lane-bias injection, so control stays consistent even when the detector loses confidence.
 - Configurable lane-warp calibration panel that lets you toggle the automatic horizon trim, manually drag the four normalized warp points, and keep the translucent lane corridor glued to the pavement on any camera height.
 - CPU/GPU acceleration toggle plus an advisor switch so you can run entirely on CPU hardware, enable a Quadro P520 compatibility mode, and silence narration when you need the lightest loop.
-- Live launch dashboard with camera feed, translucent lane-corridor overlays, throttle/brake gauges, actuator readouts, and lane/arbiter status plus a bird’s-eye mini-map.
+- Live launch dashboard with camera feed, optional lane-corridor overlays, and arbiter status plus a bird’s-eye mini-map.
 - Scroll-friendly desktop GUI with Setup, Launch, and Media Test tabs so you can configure hardware, run the live pilot, or upload recorded drives for offline evaluation.
 - Command parser that understands phrases such as "drive to the plaza", "drive 2 m forward", or "turn right" and feeds them into the navigator.
 - Structured telemetry exports (`logs/command_state.json`, `logs/telemetry.jsonl`, `logs/incidents.jsonl`) for auditing and supervision.
@@ -44,9 +44,9 @@ This package contains a self-contained autonomous driving stack tailored for lig
 
    The application now bootstraps itself: it scans your hardware, detects whether you are running native Ubuntu, Ubuntu-on-WSL, or Jetson JetPack, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. If the host Python refuses system-wide installs (PEP 668 “externally managed environment”), the bootstrapper automatically provisions `.venv/` and re-runs the install inside that sandbox so the GUI still opens with a single command. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the safety arbiter understands real clearance.
 
-3. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. The live feed shows the current frame, projected trajectory lines, throttle/brake gauges, actuator readouts, the reconstructed lane corridor, and safety-arbiter verdicts. Use the messaging panel to monitor ALLOW/AMEND/BLOCK decisions and send natural-language directives back. The launch controls expose the lane detector profile, Safety Mindset toggle, Ambient cruising toggle, persona picker, a one-click **Acceleration Mode** combo (Auto, CPU-only, CUDA, or the Quadro P520 compatibility path), and an **Enable Advisor** checkbox so you can silence narration when you need the lightest possible loop. Scroll a little farther to the **Lane Alignment & Warp** box to toggle the automatic horizon trim, dial in an extra manual tilt, and edit the four normalized trapezoid points so the overlay hugs whatever camera pitch or handlebar mount you are using.
+3. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. The live feed shows the current frame, YOLO bounding boxes, an optional lane corridor overlay (only when detections are confident), and safety-arbiter verdicts. Use the messaging panel to monitor ALLOW/AMEND/BLOCK decisions and send natural-language directives back. The launch controls expose the lane detector profile, Safety Mindset toggle, Ambient cruising toggle, persona picker, a one-click **Acceleration Mode** combo (Auto, CPU-only, CUDA, or the Quadro P520 compatibility path), and an **Enable Advisor** checkbox so you can silence narration when you need the lightest possible loop. Scroll a little farther to the **Lane Alignment & Warp** box to toggle the automatic horizon trim, dial in an extra manual tilt, and edit the four normalized trapezoid points so the overlay hugs whatever camera pitch or handlebar mount you are using.
 
-4. **Use the *Media Test* tab** when you want to sanity-check the AI without riding the scooter. Point it at any road clip (`.mp4`, `.mov`, `.avi`, `.mkv`) or still photo (`.png`, `.jpg`, `.bmp`). The tab reuses your current launch settings, replays the media through the full pilot stack, and writes a new video with the steering vector, throttle/brake bars, lane clearance gauges, directives, and captions burned into every frame. The overlay lane corridor follows the same fixed, downward-tilted calibration as the live feed so the lane band hugs the pavement instead of drifting toward the sky. Pick a folder or filename to save the overlay anywhere you want (or leave it blank to stick with `logs/media_tests/`). The preview panel streams the most recent overlay so you can watch the run while it renders, and a dedicated **Stop** button lets you cancel the export, discard the partial file, and switch clips instantly.
+4. **Use the *Media Test* tab** when you want to sanity-check the AI without riding the scooter. Point it at any road clip (`.mp4`, `.mov`, `.avi`, `.mkv`) or still photo (`.png`, `.jpg`, `.bmp`). The tab reuses your current launch settings, replays the media through the full pilot stack, and writes a new video with YOLO boxes, captions, and (when available) the translucent lane corridor burned into every frame. The overlay lane corridor follows the same fixed, downward-tilted calibration as the live feed so the lane band hugs the pavement instead of drifting toward the sky. Pick a folder or filename to save the overlay anywhere you want (or leave it blank to stick with `logs/media_tests/`). The preview panel streams the most recent overlay so you can watch the run while it renders, and a dedicated **Stop** button lets you cancel the export, discard the partial file, and switch clips instantly.
 
 ### Automated environment detection
 
@@ -91,7 +91,7 @@ If you prefer the CLI or need to run headless, you can still launch the pilot di
    The launcher checks dependencies, starts the camera, runs perception and the arbitration stack, and prints actuator commands together with the arbiter verdict and reasons:
 
    ```text
-   time=3.42s steer=+0.120 throttle=0.280 brake=0.000 arbiter=AMEND reasons=lane_bias_right,vru_slow goal="drive 2 m forward"
+   time=3.42s steer=+0.120 throttle=0.280 brake=0.000 arbiter=AMEND reasons=vru_slow goal="drive 2 m forward"
    ```
 
    Press `q` in the visualization window or send `Ctrl+C` to exit.
@@ -129,9 +129,9 @@ The launcher accepts several runtime flags:
 
 1. **CameraSensor** (`autonomy/sensors/camera.py`) continuously streams frames.
 2. **ObjectDetector** (`autonomy/perception/object_detection.py`) identifies obstacles using YOLO and returns bounding boxes. The detector now honors `--device`/Acceleration Mode, so you can run entirely on CPU.
-3. **LaneDetector** (`autonomy/perception/lane_detection.py`) equalizes lighting, runs Sobel/Canny filters, applies a pre-tuned downward-tilted warp, warps the roadway into a cached bird’s-eye view, fits lane lines, and reports curvature/offset values that mirror openpilot’s lateral planner.
+3. **LaneDetector** (`autonomy/perception/lane_detection.py`) equalizes lighting, runs Sobel/Canny filters, applies a pre-tuned downward-tilted warp, warps the roadway into a cached bird’s-eye view, fits lane lines, and reports curvature/offset values that mirror openpilot’s lateral planner. The results are used strictly for visualization and logging.
 4. **CommandInterface** (`autonomy/ai/command_interface.py`) parses operator phrases and exposes structured goals.
-5. **Navigator** (`autonomy/planning/navigator.py`) blends obstacle density, lane geometry, and the active goal to produce a steering bias, target speed, and goal context. Lane offsets directly nudge the steering bias back toward the center of any detected lane/shoulder.
+5. **Navigator** (`autonomy/planning/navigator.py`) blends obstacle density and the active goal to produce a steering bias, target speed, and goal context—without consuming lane geometry so the AI stays in charge of motion even when no lines are visible.
 6. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
 7. **ControlArbiter** (`autonomy/control/arbitration.py`) fuses the Pilot proposal with the deterministic safety arbiter verdict, Safety Mindset caps, and SafetyGate clamps to publish the final actuator command.
 8. **Riding Companion** (`autonomy/control/companion.py`) narrates each arbiter decision when enabled, while **TelemetryLogger** (`autonomy/control/telemetry.py`) records JSONL logs for auditing.
@@ -147,7 +147,7 @@ The upgraded lane detector still mirrors openpilot’s lateral planner but now l
 5. **Sliding-window + previous-fit tracker** – The detector gathers lane pixels with the classic openpilot window search and falls back to a “search around poly” mode when lines are faint, smoothing polynomial fits frame-to-frame.
 6. **Reprojection + overlay** – The left/right rails and the center corridor are projected back on top of the live feed, filled with a translucent highlight, and echoed in a mini bird’s-eye inset so you can see what the detector thinks at a glance.
 
-From those fits we derive lane width, curvature, and the scooter’s lateral offset in meters. The navigator feeds those offsets back into the steering bias so the pilot recenters inside any detected lane, while the arbiter tags AMEND/BLOCK events with `lane_bias_right`, `lane_too_narrow`, or `unknown_lane` when confidence drops. Lane-induced hazards are capped (≤0.18) and blended with a higher lane weight so the pilot recenters decisively without panic-braking on every video.
+From those fits we derive lane width, curvature, and the scooter’s lateral offset in meters. Those numbers feed the overlay (so you can see the translucent corridor, rails, and bird’s-eye inset) and telemetry only—the navigator, controller, and arbiter never touch them. If the detector does not see a lane, the overlay simply stays hidden and the AI keeps following YOLO detections plus the active goal.
 
 ## Command Interface Tips
 
@@ -170,11 +170,11 @@ The deterministic safety arbiter inspects each control tick and chooses one of t
 
 Key triggers:
 
-- **Fail-stop** when time-to-collision drops below the configured `ttc_block_s`, hazard level peaks, lane mismatch is detected, sensor confidence collapses, or the vehicle envelope would collide with nearby obstacles/curbs.
-- **Takeover** (AMEND) when a safer lateral bias exists, vulnerable road users are close, the Safety Mindset cap is exceeded, or lateral clearance tightens and the arbiter nudges away from the hazard.
+- **Fail-stop** when time-to-collision drops below the configured `ttc_block_s`, hazard level peaks, sensor confidence collapses, or the vehicle envelope would collide with nearby obstacles/curbs.
+- **Takeover** (AMEND) when vulnerable road users are close, the Safety Mindset cap is exceeded, or lateral clearance tightens and the arbiter nudges away from the hazard.
 - **Timeout** safeguards: if the arbiter exceeds its time budget, the previous verdict persists for one tick, then the system defaults to BLOCK.
 
-The optional Safety Mindset applies contextual caps before arbitration. Profiles such as `cautious_pedestrian`, `low_visibility`, and `worst_case_child` adjust maximum speed and minimum clearance. Uncertainty bias further reduces caps when lane confidence is low or perception is degraded.
+The optional Safety Mindset applies contextual caps before arbitration. Profiles such as `cautious_pedestrian`, `low_visibility`, and `worst_case_child` adjust maximum speed and minimum clearance. Uncertainty bias further reduces caps whenever perception confidence is degraded.
 
 Ambient mode gates motion when no explicit goal is set—movement occurs only when the arbiter returns ALLOW/AMEND, and throttle is limited to a gentle cruise. The riding companion narrates decisions every ≥2 s (e.g., “Fail-stop: pedestrian crossing ahead”).
 
@@ -186,15 +186,13 @@ Ambient mode gates motion when no explicit goal is set—movement occurs only wh
 | Scenario | Expected Behavior |
 | --- | --- |
 | Obstacle 1.5 m ahead at cruising speed | Arbiter emits `BLOCK` within one tick, SafetyGate holds full brake until obstacle clears + debounce. Logged with reason `ttc_low` and incident entry. |
-| Bike lane available on the right | Lane detector spots extra clearance, arbiter issues `AMEND` steering bias right with reduced throttle (`lane_bias_right`), SafetyGate publishes the amended command. |
 | Forced arbiter timeout | Latency budget exceeded → previous verdict reused for ≤1 tick, then `BLOCK` with reason `timeout`. |
 | Safety Mindset toggle | With mindset OFF, throttle follows Pilot target. Turning mindset ON lowers `caps_speed` and logs the active profile. |
-| Ambient, uncertain lane | Low lane confidence with ambient ON → Arbiter `BLOCK`, scooter remains stopped until confidence recovers. |
 | Companion narration | Messages such as “Fail-stop: pedestrian crossing ahead” appear in logs no more than once every 2 s. |
 
 ### Telemetry & Incident Logging
 
-- `logs/telemetry.jsonl` records every tick with arbiter decision, reason tags, latency, proposed vs final command, caps, lane context, and navigation sub-goal state.
+- `logs/telemetry.jsonl` records every tick with arbiter decision, reason tags, latency, proposed vs final command, caps, and navigation sub-goal state.
 - `logs/incidents.jsonl` captures each AMEND/BLOCK event with a reference to 5 s pre/post clips (populate the clip fields if you archive video). Use these logs to audit fail-stop coverage and arbiter timing.
 - Vehicle envelope metadata (lane width estimate, left/right clearance, required clearance) is emitted with each tick so you can audit why the arbiter held, amended, or released control.
 
