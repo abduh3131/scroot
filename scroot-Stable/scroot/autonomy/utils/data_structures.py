@@ -190,6 +190,7 @@ class PilotTickData:
     caps: SafetyCaps
     gate_tags: Tuple[str, ...]
     companion: Optional[str] = None
+    lidar_ranges: Optional[np.ndarray] = None
 
 @dataclass(frozen=True)
 class ActuatorCommand:

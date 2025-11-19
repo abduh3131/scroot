@@ -33,6 +33,27 @@ from autonomy.perception.lane_detection import LaneDetectorConfig
 from autonomy.utils.data_structures import PilotTickData
 
 
+def summarize_lidar_ranges(ranges: Optional[np.ndarray]) -> tuple[str, Optional[float]]:
+    """Return a friendly LiDAR summary and the closest valid hit."""
+
+    if ranges is None:
+        return "n/a", None
+    try:
+        values = np.asarray(ranges, dtype=np.float32).reshape(-1)
+    except Exception:
+        return "n/a", None
+    if values.size == 0:
+        return "n/a", None
+    mask = np.isfinite(values) & (values > 0.0)
+    if not np.any(mask):
+        return "n/a", None
+    filtered = values[mask]
+    closest = float(np.min(filtered))
+    median = float(np.median(filtered))
+    summary = f"{closest:.2f} m min | {median:.2f} m med"
+    return summary, closest
+
+
 ACCELERATION_CHOICES = ["auto", "cpu", "cuda", "quadro_p520"]
 
 ACCELERATION_NOTES = {
@@ -97,6 +118,11 @@ class PilotRunner(threading.Thread):
                     line += f" goal={goal}"
                 if lane_status:
                     line += lane_status
+                lidar_summary, _ = summarize_lidar_ranges(
+                    self._pilot.latest_lidar if self._pilot else None
+                )
+                if lidar_summary != "n/a":
+                    line += f" lidar={lidar_summary}"
                 if review:
                     line += f" arbiter={review.verdict.value}"
                     if review.reason_tags:
@@ -321,6 +347,7 @@ class ScooterApp(tk.Tk):
         self._last_arbiter_verdict: str = ""
         self._last_lane_summary: str = ""
         self._last_companion: str = ""
+        self._last_lidar_summary: str = ""
 
         self.lane_point_vars: list[tuple[tk.DoubleVar, tk.DoubleVar]] = []
 
@@ -669,9 +696,13 @@ class ScooterApp(tk.Tk):
         self.arbiter_status = tk.StringVar(value="Idle")
         ttk.Label(telemetry_frame, textvariable=self.arbiter_status, width=18).grid(row=1, column=3, sticky="w")
 
-        ttk.Label(telemetry_frame, text="Lane Status").grid(row=1, column=0, sticky="w")
+        ttk.Label(telemetry_frame, text="Lane Status").grid(row=2, column=0, sticky="w")
         self.lane_status = tk.StringVar(value="n/a")
-        ttk.Label(telemetry_frame, textvariable=self.lane_status, width=18).grid(row=1, column=1, sticky="w")
+        ttk.Label(telemetry_frame, textvariable=self.lane_status, width=18).grid(row=2, column=1, sticky="w")
+
+        ttk.Label(telemetry_frame, text="LiDAR (closest | median)").grid(row=2, column=2, sticky="w")
+        self.lidar_status = tk.StringVar(value="n/a")
+        ttk.Label(telemetry_frame, textvariable=self.lidar_status, width=22).grid(row=2, column=3, sticky="w")
 
         self.message_frame = ttk.LabelFrame(self.run_frame, text="Command Console")
         self.message_frame.grid(row=14, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
@@ -1110,6 +1141,9 @@ class ScooterApp(tk.Tk):
             offset = meta.get("lane_offset_m") if isinstance(meta, dict) else None
             if isinstance(conf, (float, int)) and isinstance(offset, (float, int)):
                 summary += f"\nLane conf={float(conf):.2f} off={float(offset):+.2f}m"
+            lidar_text, _ = summarize_lidar_ranges(payload.lidar_ranges)
+            if lidar_text != "n/a":
+                summary += f"\nLiDAR {lidar_text}"
             self.test_preview_label.configure(image=self._media_test_photo, text=summary, compound=tk.TOP)
 
         self.after(0, update)
@@ -1408,6 +1442,15 @@ class ScooterApp(tk.Tk):
             else:
                 self._last_lane_summary = ""
             self.lane_status.set(lane_text)
+
+            lidar_text, _ = summarize_lidar_ranges(payload.lidar_ranges)
+            self.lidar_status.set(lidar_text)
+            if lidar_text != "n/a":
+                if lidar_text != self._last_lidar_summary:
+                    self._append_message(f"LiDAR: {lidar_text}")
+                    self._last_lidar_summary = lidar_text
+            else:
+                self._last_lidar_summary = ""
 
             if payload.review:
                 reason = ", ".join(payload.review.reason_tags)

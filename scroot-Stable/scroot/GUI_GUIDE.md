@@ -38,7 +38,7 @@ Validation runs when you press **Save Setup**; the app warns if any value is mis
 The Launch tab controls runtime options and lets you start/stop the autonomy loop.
 
 ### Camera Source
-- **Camera Source** entry accepts either a numeric index (`0`, `1`, ...) or a video file/RTSP URL.
+- **Camera Source** entry accepts either a numeric index (`0`, `1`, ...), a video file/RTSP URL, or the runtime SensorHub snapshot (default: `~/scroot/runtime_inputs/camera.jpg`).
 - **How to find the index**:
   - On Ubuntu/WSL: run `ls /dev/video*` and try the lowest number that appears when the camera is plugged in.
   - With `v4l2-ctl --list-devices` you can see descriptive names mapped to `/dev/videoX` nodes.
@@ -75,12 +75,16 @@ The Launch tab controls runtime options and lets you start/stop the autonomy loo
 ### Launch Controls
 - **Start Pilot** launches the autonomy stack using all settings from both tabs (camera, vehicle envelope, lane profile, mindset, etc.). The button disables itself while the system runs.
 - **Stop Pilot** sends a stop signal to the background thread. Always use this before closing the application to ensure logs flush cleanly.
-- **Launch Log** streams real-time telemetry, including actuator commands, arbiter verdicts (`ALLOW`, `AMEND`, `BLOCK`), reason tags (e.g., `ttc_low`, `lane_bias_right`), and narration lines.
+- **Launch Log** streams real-time telemetry, including actuator commands, arbiter verdicts (`ALLOW`, `AMEND`, `BLOCK`), reason tags (e.g., `ttc_low`, `vru_slow`), and narration lines.
+
+### Telemetry + LiDAR Snapshot
+- **Throttle / Brake / Steer** gauges mirror the live actuator command so you can confirm the pilot is smoothly modulating inputs.
+- **Safety Arbiter** label shows the latest verdict plus reason tags if an AMEND/BLOCK occurred.
+- **Lane Status** reports the detector confidence and lateral offset (positive = right of center, negative = left). The overlay remains cosmetic but this readout confirms the warp calibration is sensible.
+- **LiDAR (closest | median)** continuously summarizes the fused ranges coming from `~/scroot/runtime_inputs/lidar.npy`. As soon as the ROS bridge writes the SensorHub data, the GUI prints a line such as `0.82 m min | 4.10 m med` both in the telemetry row and the Command Console so you can validate that the fused topic is feeding the pilot.
 
 ### Live Camera, Overlay, and Messaging
-- **Live Feed panel** shows the current camera image with projected trajectory lines (center and envelope boundaries). The banner color mirrors the arbiter verdict (green = ALLOW, amber = AMEND, red = BLOCK) and lists reason tags plus latency. The lane detector paints a translucent corridor between the rails, drops a miniature bird’s-eye inset in the upper-right corner so you can verify what the detector sees, and uses the warp + horizon trim you saved in the Launch tab so the overlay hugs the pavement instead of floating toward the horizon.
-- **Throttle/Brake gauges** update each tick to mirror actuator outputs. Green bars rise with throttle, red bars rise with braking, and the steer readout helps correlate servo motion with what you see on screen.
-- **Gate tags & caps** appear inside the overlay text whenever the SafetyGate clamps throttle (`caps_speed`, `envelope_stop`, etc.) or when the Safety Mindset imposes a stricter limit.
+- **Live Feed panel** shows the current camera image with YOLO bounding boxes and, when the detector is confident, a translucent lane corridor plus a bird’s-eye inset. The banner color mirrors the arbiter verdict (green = ALLOW, amber = AMEND, red = BLOCK) and lists reason tags plus latency. When no lane is detected the overlay remains hidden and the video feed stays clean.
 - **Command Messaging box** records every verdict change and directive in natural language. Use the entry field to send commands such as “drive 3 m forward”, “turn left”, or “stop” without leaving the GUI—the Command Interface parses them immediately.
 
 ## 3. Media Test Tab
@@ -89,14 +93,15 @@ The Launch tab controls runtime options and lets you start/stop the autonomy loo
 - **Overlay output** accepts an optional folder or filename. Leave it blank to reuse `logs/media_tests/`, or browse to any destination (the app will ensure the folder exists and append `.mp4` if needed).
 - **Generate Overlay** replays that media through the same configuration you set on the Launch tab, so your offline run mirrors the live stack (lane profile, mindset, resolution, Jetson tuning, etc.).
 - **Stop** immediately cancels the export, removes any partial overlay, and re-enables the start button so you can switch clips without waiting.
-- **Preview panel** shows the most recent overlay frame with steering vectors, throttle/brake gauges, lane lines, directives, and narration. It updates while the export runs.
+- **Preview panel** shows the most recent overlay frame with YOLO boxes, narration captions, and (when available) the lane overlay. It updates while the export runs.
 - **Status text + log** explain exactly what the exporter is doing (loading media, applying the pilot, writing frames). When it finishes, the output `.mp4` path is printed so you can open or share it.
 
 ## 4. Best Practices & Troubleshooting
 
 - **First run flow**: Run `python setup_scroot.py --skip-models`, activate `.venv/`, and execute `python -m pip install -r autonomy/requirements.txt` before launching `python scooter_app.py`. The bootstrapper still rescans hardware on each launch; rerun **Install Dependencies** if you switch profiles.
+- **ROS sensor feed**: Bring the fused sensors online with `roslaunch sensor_interface sensor_interface_dynamic.launch`, mirror them with `./scroot/bridge/ros_sensor_bridge.py`, then start the pilot via `python3 scroot/main.py` so the GUI and CLI share the same runtime camera/LiDAR files.
 - **Camera testing**: Use `python autonomy_launcher.py --visualize` after configuring the camera to confirm the feed before a full ride.
-- **Arbiter feedback**: Watch the Launch Log for reason tags like `unknown_lane` or `timeout`. Frequent timeouts mean you should lower resolution/FPS or pick a lighter model profile.
+- **Arbiter feedback**: Watch the Launch Log for reason tags like `ttc_low`, `timeout`, or `vru_slow`. Frequent timeouts mean you should lower resolution/FPS or pick a lighter model profile.
 - **Incident logs**: Anytime the arbiter AMENDs or BLOCKs, entries go to `logs/incidents.jsonl` with references to 5-second clips (if recorded) for quick review.
 
 With these references, every toggle in the GUI should map cleanly to the safety, navigation, or hardware behavior you expect during a ride.
