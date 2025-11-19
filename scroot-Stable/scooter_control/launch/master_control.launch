@@ -1,0 +1,36 @@
+<launch>
+    <!-- Master Control Launch File for the Scooter Robot -->
+    <!-- This file brings up all necessary sensors, AI, and control nodes. -->
+
+    <!-- 1. Launch Sensor Interface (LiDAR, Camera, and Fusion Node) -->
+    <!-- This includes the rplidar driver, usb_cam driver, and the sensor_interface_node.py -->
+    <include file="$(find sensor_interface)/launch/sensor_interface.launch" />
+
+    <!-- 2. Launch YOLO Node -->
+    <node name="dual_yolo_node" pkg="scooter_control" type="dual_yolo_node.py" output="screen" />
+
+    <!-- 3. Launch Object Avoidance Node -->
+    <node name="object_avoidance_node" pkg="scooter_control" type="object_avoidance_node.py" output="screen">
+        <!-- Example parameters, adjust as needed -->
+        <param name="~object_avoidance/lidar_arc_angle" value="180.0" />
+        <param name="~object_avoidance/smoothing_factor" value="0.2" />
+        <param name="~object_avoidance/critical_obstacle_distance" value="1.5" />
+    </node>
+
+    <!-- 4. Launch Safety Supervisor Node -->
+    <node name="safety_supervisor_node" pkg="scooter_control" type="safety_supervisor_node.py" output="screen">
+        <!-- Example parameters, adjust as needed -->
+        <param name="~safety_supervisor/emergency_stop_distance" value="0.3" />
+        <param name="~safety_supervisor/sensor_timeout" value="0.5" />
+    </node>
+
+    <!-- 5. Launch Lane Assist Node -->
+    <!-- Assuming this node is ready to be launched -->
+    <node name="lane_assist_node" pkg="scooter_control" type="lane_assist_node.py" output="screen" />
+
+    <!-- 6. Launch RViz for Visualization -->
+    <!-- Ensure the master_control.rviz file is in the scooter_control/rviz directory -->
+    <arg name="rviz_config" default="$(find scooter_control)/rviz/master_control.rviz" />
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(arg rviz_config)" required="true" />
+
+</launch>
