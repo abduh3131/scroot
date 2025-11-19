@@ -19,14 +19,16 @@ def _candidate_roots() -> list[Path]:
 
 
 def _import_bridge_module():
+    candidates = ["bridge.ai_input_bridge", "bridge.ros_sensor_bridge"]
     for root in _candidate_roots():
-        bridge_path = root / "bridge" / "ros_sensor_bridge.py"
-        if bridge_path.exists():
-            if str(root) not in sys.path:
-                sys.path.insert(0, str(root))
-            return importlib.import_module("bridge.ros_sensor_bridge")
+        for module_name in candidates:
+            bridge_path = root / Path(module_name.replace(".", "/") + ".py")
+            if bridge_path.exists():
+                if str(root) not in sys.path:
+                    sys.path.insert(0, str(root))
+                return importlib.import_module(module_name)
     raise RuntimeError(
-        "Unable to locate scroot/bridge/ros_sensor_bridge.py. Ensure the scroot repo is cloned in ~/scroot."
+        "Unable to locate scroot bridge modules. Ensure the repo is cloned in ~/scroot."
     )
 
 
@@ -35,7 +37,7 @@ def main() -> None:
     if hasattr(module, "main"):
         module.main()
     else:  # pragma: no cover
-        raise RuntimeError("bridge.ros_sensor_bridge is missing a main() entry point")
+        raise RuntimeError("bridge.ai_input_bridge is missing a main() entry point")
 
 
 if __name__ == "__main__":  # pragma: no cover

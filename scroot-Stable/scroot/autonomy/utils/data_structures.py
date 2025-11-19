@@ -206,6 +206,15 @@ class LidarSnapshot:
 
 
 @dataclass(frozen=True)
+class SensorSample:
+    """Single fused SensorHub snapshot consumed by the autonomy pilot."""
+
+    frame: np.ndarray
+    timestamp: float
+    lidar: Optional[LidarSnapshot] = None
+
+
+@dataclass(frozen=True)
 class PilotTickData:
     """Snapshot of each control tick for live dashboards/telemetry."""
 

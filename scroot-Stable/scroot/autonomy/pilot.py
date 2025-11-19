@@ -43,6 +43,7 @@ from autonomy.utils.data_structures import (
     PerceptionSummary,
     PilotTickData,
     SafetyCaps,
+    SensorSample,
     LidarSnapshot,
     VehicleEnvelope,
 )
@@ -91,6 +92,7 @@ class PilotConfig:
     calibration_reference_distance_m: float = 2.0
     calibration_reference_pixels: float = 220.0
     companion_enabled: bool = True
+    use_internal_sensors: bool = True
 
 
 class AutonomyPilot:
@@ -103,13 +105,16 @@ class AutonomyPilot:
     ) -> None:
         self.config = config or PilotConfig()
         self._tick_callback = tick_callback
-        self._camera = CameraSensor(
-            source=self.config.camera_source,
-            width=self.config.camera_width,
-            height=self.config.camera_height,
-            fps=self.config.camera_fps,
-        )
-        self._lidar = LidarSensor(self.config.lidar_source)
+        self._camera: Optional[CameraSensor] = None
+        self._lidar: Optional[LidarSensor] = None
+        if self.config.use_internal_sensors:
+            self._camera = CameraSensor(
+                source=self.config.camera_source,
+                width=self.config.camera_width,
+                height=self.config.camera_height,
+                fps=self.config.camera_fps,
+            )
+            self._lidar = LidarSensor(self.config.lidar_source)
         self._vehicle = VehicleEnvelope(
             width_m=self.config.vehicle_width_m,
             length_m=self.config.vehicle_length_m,
@@ -204,6 +209,10 @@ class AutonomyPilot:
 
     def run(self) -> Iterator[ActuatorCommand]:
         logging.info("Starting autonomous pilot loop")
+        if not self.config.use_internal_sensors or self._camera is None or self._lidar is None:
+            raise RuntimeError(
+                "PilotConfig.use_internal_sensors is False; feed SensorHub data via AutonomyPilot.process_sample()"
+            )
         self._running = True
         frame_iterator = self._camera.frames()
         for success, frame in frame_iterator:
@@ -213,110 +222,139 @@ class AutonomyPilot:
                 logging.warning("Failed to read frame from camera")
                 continue
 
-            current_command: Optional[HighLevelCommand] = None
-            if self._command_interface:
-                current_command = self._command_interface.poll()
+            lidar_snapshot: Optional[LidarSnapshot] = None
+            lidar_success, latest = self._lidar.read()
+            if lidar_success and latest is not None:
+                lidar_snapshot = latest
 
-            lidar_success, lidar_snapshot = self._lidar.read()
-            if lidar_success and lidar_snapshot is not None:
-                self._latest_lidar = lidar_snapshot
-
-            lane_estimate = self._lane_detector.analyze(frame)
-            self._latest_lane = lane_estimate
-
-            perception_summary = self._detector.detect(frame)
-            decision = self._navigator.plan(
-                perception_summary.objects,
-                perception_summary.frame_size,
-                current_command,
-                lane_estimate=None,
-            )
-
-            if current_command and current_command.command_type == "stop":
-                decision = replace(decision, desired_speed=0.0, hazard_level=1.0, enforced_stop=True)
-
-            proposed_command = self._controller.command(decision)
-
-            scene_context = self._context_analyzer.analyze(decision)
-            caps = self._mindset.evaluate(scene_context.snapshot, decision)
-            has_goal = bool(current_command and current_command.command_type != "stop")
-            ambient_mode = self.config.navigation_intent.ambient_mode
-
-            tick_time = time.time()
-            arbitration = self._arbiter.step(
-                timestamp=tick_time,
-                perception_objects=perception_summary.objects,
-                decision=decision,
-                proposed=proposed_command,
-                context=scene_context.snapshot,
-                caps=caps,
-                has_goal=has_goal,
-                ambient_mode=ambient_mode,
-                subgoal_hint=scene_context.subgoal_hint,
-            )
-
-            command = arbitration.final_command
-            review = arbitration.review
-            companion_message = ""
-            if self._companion and review:
-                narrated = self._companion.narrate(review)
-                if narrated:
-                    companion_message = narrated
-
-            self._telemetry.record(
-                timestamp=tick_time,
-                decision=decision,
-                proposed=proposed_command,
-                result=command,
-                review=review,
-                caps=caps,
-                context=scene_context.snapshot,
-                gate_tags=arbitration.gate_tags,
-                subgoal=arbitration.subgoal,
-                companion_message=companion_message,
-            )
-
-            self._latest_decision = decision
-            self._latest_review = review
-            self._latest_context = scene_context.snapshot
-            self._latest_caps = caps
-            self._latest_subgoal = arbitration.subgoal
-            self._latest_companion = companion_message or None
-
-            overlay_frame = None
-            if self._tick_callback or self.config.visualize:
-                overlay_frame = self._compose_overlay(
-                    frame,
-                    perception_summary,
-                    lane_estimate,
-                )
-
-            if self._tick_callback and overlay_frame is not None:
-                self._publish_tick(
-                    timestamp=tick_time,
-                    overlay=overlay_frame,
-                    command=command,
-                    review=review,
-                    decision=decision,
-                    context=scene_context.snapshot,
-                    caps=caps,
-                    gate_tags=arbitration.gate_tags,
-                    companion=companion_message,
-                    lidar=self._latest_lidar,
-                )
-
-            if self.config.visualize and overlay_frame is not None:
-                self._visualize(overlay_frame)
-
-            self._export_command_state(current_command)
-
+            sample = SensorSample(frame=frame, timestamp=time.time(), lidar=lidar_snapshot)
+            command = self.process_sample(sample, command_override=None)
             yield command
 
         self._camera.close()
         logging.info("Pilot loop terminated")
 
+    def process_sample(
+        self,
+        sample: SensorSample,
+        *,
+        command_override: Optional[HighLevelCommand] = None,
+    ) -> ActuatorCommand:
+        if sample.frame is None:
+            raise ValueError("SensorSample.frame must contain an image")
+
+        if not self._running:
+            self._running = True
+
+        current_command = command_override
+        if current_command is None and self._command_interface:
+            current_command = self._command_interface.poll()
+
+        if sample.lidar is not None:
+            self._latest_lidar = sample.lidar
+
+        tick_time = sample.timestamp if sample.timestamp > 0 else time.time()
+        return self._process_tick(frame=sample.frame, current_command=current_command, tick_time=tick_time)
+
     def stop(self) -> None:
         self._running = False
+
+    def _process_tick(
+        self,
+        *,
+        frame: np.ndarray,
+        current_command: Optional[HighLevelCommand],
+        tick_time: float,
+    ) -> ActuatorCommand:
+        lane_estimate = self._lane_detector.analyze(frame)
+        self._latest_lane = lane_estimate
+
+        perception_summary = self._detector.detect(frame)
+        decision = self._navigator.plan(
+            perception_summary.objects,
+            perception_summary.frame_size,
+            current_command,
+            lane_estimate=None,
+        )
+
+        if current_command and current_command.command_type == "stop":
+            decision = replace(decision, desired_speed=0.0, hazard_level=1.0, enforced_stop=True)
+
+        proposed_command = self._controller.command(decision)
+
+        scene_context = self._context_analyzer.analyze(decision)
+        caps = self._mindset.evaluate(scene_context.snapshot, decision)
+        has_goal = bool(current_command and current_command.command_type != "stop")
+        ambient_mode = self.config.navigation_intent.ambient_mode
+
+        arbitration = self._arbiter.step(
+            timestamp=tick_time,
+            perception_objects=perception_summary.objects,
+            decision=decision,
+            proposed=proposed_command,
+            context=scene_context.snapshot,
+            caps=caps,
+            has_goal=has_goal,
+            ambient_mode=ambient_mode,
+            subgoal_hint=scene_context.subgoal_hint,
+        )
+
+        command = arbitration.final_command
+        review = arbitration.review
+        companion_message = ""
+        if self._companion and review:
+            narrated = self._companion.narrate(review)
+            if narrated:
+                companion_message = narrated
+
+        self._telemetry.record(
+            timestamp=tick_time,
+            decision=decision,
+            proposed=proposed_command,
+            result=command,
+            review=review,
+            caps=caps,
+            context=scene_context.snapshot,
+            gate_tags=arbitration.gate_tags,
+            subgoal=arbitration.subgoal,
+            companion_message=companion_message,
+        )
+
+        self._latest_decision = decision
+        self._latest_review = review
+        self._latest_context = scene_context.snapshot
+        self._latest_caps = caps
+        self._latest_subgoal = arbitration.subgoal
+        self._latest_companion = companion_message or None
+
+        overlay_frame = None
+        if self._tick_callback or self.config.visualize:
+            overlay_frame = self._compose_overlay(
+                frame,
+                perception_summary,
+                lane_estimate,
+            )
+
+        if self._tick_callback and overlay_frame is not None:
+            self._publish_tick(
+                timestamp=tick_time,
+                overlay=overlay_frame,
+                command=command,
+                review=review,
+                decision=decision,
+                context=scene_context.snapshot,
+                caps=caps,
+                gate_tags=arbitration.gate_tags,
+                companion=companion_message,
+                lidar=self._latest_lidar,
+            )
+
+        if self.config.visualize and overlay_frame is not None:
+            self._visualize(overlay_frame)
+
+        self._export_command_state(current_command)
+
+        return command
 
     def _export_command_state(
         self,

@@ -99,7 +99,7 @@ The Launch tab controls runtime options and lets you start/stop the autonomy loo
 ## 4. Best Practices & Troubleshooting
 
 - **First run flow**: Run `python setup_scroot.py --skip-models`, activate `.venv/`, and execute `python -m pip install -r autonomy/requirements.txt` before launching `python scooter_app.py`. The bootstrapper still rescans hardware on each launch; rerun **Install Dependencies** if you switch profiles.
-- **ROS sensor feed**: Bring the fused sensors online with `roslaunch sensor_interface sensor_interface_dynamic.launch`, mirror them with `./scroot/bridge/ros_sensor_bridge.py`, then start the pilot via `python3 scroot/main.py` so the GUI and CLI share the same runtime camera/LiDAR/metadata files.
+- **ROS sensor feed**: Bring the fused sensors online with `roslaunch sensor_interface sensor_interface_dynamic.launch`, run `./scroot/bridge/ai_input_bridge.py --mirror-runtime-inputs` so AutonomyPilot consumes `/sensor_hub/data` directly while keeping the runtime `{camera.jpg,lidar.npy,sensor_meta.json}` snapshots fresh, then point the GUI at those mirrored files.
 - **Camera testing**: Use `python autonomy_launcher.py --visualize` after configuring the camera to confirm the feed before a full ride.
 - **Arbiter feedback**: Watch the Launch Log for reason tags like `ttc_low`, `timeout`, or `vru_slow`. Frequent timeouts mean you should lower resolution/FPS or pick a lighter model profile.
 - **Incident logs**: Anytime the arbiter AMENDs or BLOCKs, entries go to `logs/incidents.jsonl` with references to 5-second clips (if recorded) for quick review.

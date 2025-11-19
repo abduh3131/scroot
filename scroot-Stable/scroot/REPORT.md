@@ -1,7 +1,7 @@
 # Development Report
 
 ## Overview
-The scooter autonomy stack now runs on Python 3.8 and newer, spans Jetson Orin to desktop GPUs, and offers a friendlier desktop app. Sensor ingestion is now decoupled from hardware by mirroring the ROS `/sensor_hub/data` stream into `~/scroot/runtime_inputs/` so every AI module reads the same fused camera and LiDAR snapshots regardless of how the data arrives. The GUI scrolls smoothly on every tab, applies Jetson-specific CUDA defaults when that hardware is detected, and stores state between sessions. A brand-new **Media Test** tab lets you upload any road clip or still photo, run it through the entire pilot, and save a video with detection boxes, lane cues, and narration painted on top &mdash; now to any folder you pick, and with a Stop button so you can switch clips instantly. Under the hood the openpilot-style lane detector now performs CLAHE/Canny/HSV/LAB preprocessing, caches its bird’s-eye warp, smooths a bounded auto horizon trim, exposes a GUI editor for the four normalized warp points, and draws a translucent lane corridor plus a bird’s-eye inset **purely as an overlay**. The AI handles steering/throttle/braking independently so losing the overlay never changes the control decision. The YOLO stack can be forced to run on CPU when CUDA kernels are missing, a Quadro P520 compatibility option locks YOLO to `cuda:0` on legacy laptops, the advisor narration is a simple checkbox away, and hazards remain capped so the pilot eases back on speed instead of panic-braking every time a video clip briefly misaligns.
+The scooter autonomy stack now runs on Python 3.8 and newer, spans Jetson Orin to desktop GPUs, and offers a friendlier desktop app. Sensor ingestion now flows straight from ROS: `bridge/ai_input_bridge.py` subscribes to `/sensor_hub/data`, converts each SensorHub packet into `SensorSample` + `LidarSnapshot` objects, feeds them into `AutonomyPilot`, and mirrors `~/scroot/runtime_inputs/` for the GUI/offline tools when requested. The GUI scrolls smoothly on every tab, applies Jetson-specific CUDA defaults when that hardware is detected, and stores state between sessions. A brand-new **Media Test** tab lets you upload any road clip or still photo, run it through the entire pilot, and save a video with detection boxes, lane cues, and narration painted on top &mdash; now to any folder you pick, and with a Stop button so you can switch clips instantly. Under the hood the openpilot-style lane detector now performs CLAHE/Canny/HSV/LAB preprocessing, caches its bird’s-eye warp, smooths a bounded auto horizon trim, exposes a GUI editor for the four normalized warp points, and draws a translucent lane corridor plus a bird’s-eye inset **purely as an overlay**. The AI handles steering/throttle/braking independently so losing the overlay never changes the control decision. The YOLO stack can be forced to run on CPU when CUDA kernels are missing, a Quadro P520 compatibility option locks YOLO to `cuda:0` on legacy laptops, the advisor narration is a simple checkbox away, and hazards remain capped so the pilot eases back on speed instead of panic-braking every time a video clip briefly misaligns.
 
 ## Program Features to Date
 1. **Autonomy Pilot Core** – Camera ingestion, YOLO-based object detection, the new perspective-based lane detector, navigator, controller, safety mindset, telemetry logging, and riding companion narration all run inside `AutonomyPilot`.
@@ -13,7 +13,7 @@ The scooter autonomy stack now runs on Python 3.8 and newer, spans Jetson Orin t
 7. **Toggles for Lightweight Runs** – A CPU/auto/CUDA/Quadro-P520 acceleration dropdown keeps YOLO from tripping CUDA errors on unsupported GPUs, and an “Enable Advisor” checkbox lets you silence narration entirely when you want the leanest control loop.
 8. **Lane Alignment Editor** – The Launch tab now includes a Lane Alignment & Warp section with an auto horizon trim toggle, manual tilt entry, and four normalized anchor points so you can retune the translucent corridor for any handlebar camera without touching code.
 9. **Documentation Refresh** – README, GUI guide, and this report now describe the new toggles, calibration workflow, overlay-only lane detector, and offline replay flow in approachable language.
-10. **SensorHub ROS Bridge + Runtime Inputs** – `scroot/bridge/ros_sensor_bridge.py` subscribes to `/sensor_hub/data`, converts the fused camera frame via `CvBridge`, exports LiDAR ranges to `runtime_inputs/lidar.npy`, writes SensorHub metadata (angles, IMU vector, ultrasonic distance, timestamps) to `sensor_meta.json`, throttles logs to once per second, and the pilot consumes those files through the updated camera and LiDAR sensor wrappers.
+10. **AI Input Bridge + Runtime Mirror** – `scroot/bridge/ai_input_bridge.py` subscribes to `/sensor_hub/data`, converts the fused camera frame via `CvBridge`, builds `SensorSample`/`LidarSnapshot` objects for `AutonomyPilot.process_sample()`, and optionally mirrors `runtime_inputs/{camera.jpg,lidar.npy,sensor_meta.json}` for the GUI and offline CLI runs while throttling logs to once per second.
 11. **ROS Workspace Mirror** – `catkin_ws/src/` now contains the operator’s `sensor_interface` package, the `scooter_control` dual YOLO TensorRT node, and the `scroot_bridge` wrapper/launch files so a Jetson Orin can rebuild the exact `/usb_cam` + `/scan` → `/sensor_hub/data` → `/ai_input_bridge` topology shown in the provided `rqt_graph` outputs.
 
 ## GUI + Sensor Interface Workflow
@@ -25,11 +25,11 @@ Follow these steps whenever you want the desktop GUI to stay in lock-step with t
    ```
    This node publishes `sensor_interface/msg/SensorHub` messages that contain both the fused camera frame and LiDAR ranges.
 
-2. **Mirror ROS data into runtime inputs**
+2. **Run the AI Input Bridge (mirroring enabled)**
    ```bash
-   ./scroot/bridge/ros_sensor_bridge.py
+   ./scroot/bridge/ai_input_bridge.py --mirror-runtime-inputs
    ```
-   The bridge initializes the `ai_input_bridge` ROS node, subscribes to `/sensor_hub/data`, converts the camera image with `CvBridge`, converts the LiDAR ranges into a NumPy array, and writes the synchronized snapshots to `~/scroot/runtime_inputs/camera.jpg`, `~/scroot/runtime_inputs/lidar.npy`, and `~/scroot/runtime_inputs/sensor_meta.json`. The directory is auto-created, logs are throttled to one line per second, and status updates mention the timestamp of the most recent export so you know data is flowing.
+   This spins up the same `ai_input_bridge` ROS node used in production, subscribes to `/sensor_hub/data`, feeds each SensorHub packet into `AutonomyPilot`, and writes synchronized snapshots to `~/scroot/runtime_inputs/camera.jpg`, `~/scroot/runtime_inputs/lidar.npy`, and `~/scroot/runtime_inputs/sensor_meta.json` so the GUI/media tools can read them. The directory is auto-created, logs are throttled to once per second, and status updates mention the timestamp of the most recent export so you know data is flowing.
 
 3. **Launch the GUI against the runtime inputs**
    ```bash
@@ -43,7 +43,7 @@ Follow these steps whenever you want the desktop GUI to stay in lock-step with t
 
 5. **Shut down cleanly**
    - Click **Stop Pilot** in the GUI before closing the app so telemetry and narration logs flush.
-   - Terminate `ros_sensor_bridge.py` with `Ctrl+C`, then stop the ROS launch file. This order prevents dangling writers from holding the runtime files open when you’re done.
+   - Terminate `ai_input_bridge.py` with `Ctrl+C`, then stop the ROS launch file. This order prevents dangling writers from holding the runtime files open when you’re done.
 
 With this flow, the GUI, CLI (`python3 scroot/main.py`), and Media Test harness all share the exact same fused sensor snapshots, ensuring consistent perception/planning behavior regardless of whether you are driving live, replaying logs, or developing new features.
 
@@ -54,20 +54,18 @@ The mirrored ROS workspace (`catkin_ws/src/`) re-creates the operator’s setup 
 - `sensor_interface/msg/SensorHub.msg` contains the fused LiDAR ranges plus angle bounds/increments, camera frame, IMU vector, and ultrasonic distance.
 - `sensor_interface_node.py` subscribes to `/usb_cam/image_raw` and `/scan` with an `ApproximateTimeSynchronizer`, logs “Topics detected…” when both streams appear, and publishes `/sensor_hub/data` + `/sensor_hub/fused_image` while printing “Published fused /sensor_hub/data …”.
 - `dual_yolo_node.py` (package `scooter_control`) loads TensorRT/YOLO weights, subscribes to `/usb_cam/image_raw`, and publishes `/AI/annotated_image` plus `/AI/detections` (custom `DetectionArray` message) strictly for visualization/debugging.
-- `scroot_bridge` exposes `ai_input_bridge.py`, a wrapper around `~/scroot/bridge/ros_sensor_bridge.py`, and two launch files (`ai_input_bridge.launch`, `full_system.launch`) so ROS can supervise the bridge alongside the sensor stack.
+- `scroot_bridge` exposes `ai_input_bridge.py`, a wrapper around `~/scroot/bridge/ai_input_bridge.py`, and two launch files (`ai_input_bridge.launch`, `full_system.launch`) so ROS can supervise the bridge alongside the sensor stack.
 
 Expected `rqt_graph` topology (boxes = nodes, circles = topics):
 
 ```
-  /usb_cam --------------------------> /usb_cam/image_raw ---> sensor_interface_node ---> /sensor_hub/data ---> ai_input_bridge
-         \                                                                                 |
-          \-> dual_yolo_node -> /AI/annotated_image (viz)                                   V
-   rplidarNode --> /scan -----------------------------/                                     runtime_inputs/{camera.jpg,lidar.npy,sensor_meta.json}
-                                                                                                     |
-                                                                                             AutonomyPilot (python3 scroot/main.py)
+  /usb_cam --------------------------> /usb_cam/image_raw ---> sensor_interface_node ---> /sensor_hub/data ---> ai_input_bridge ---> AutonomyPilot
+         \                                                                                                          |
+          \-> dual_yolo_node -> /AI/annotated_image (viz)                                                           V
+   rplidarNode --> /scan -----------------------------/                                      runtime_inputs/{camera.jpg,lidar.npy,sensor_meta.json} (optional mirror for GUI/CLI)
 ```
 
-Dual YOLO stays off the critical path (it never feeds `/sensor_hub/data`), while the bridge is the only subscriber writing runtime files. Launch everything at once via `roslaunch scroot_bridge full_system.launch`, or run the individual commands outlined in the README/GUI guide to match the provided graphs.
+Dual YOLO stays off the critical path (it never feeds `/sensor_hub/data`), while the AI bridge is the only subscriber writing runtime files. Launch everything at once via `roslaunch scroot_bridge full_system.launch`, or run the individual commands outlined in the README/GUI guide to match the provided graphs.
 
 ## Windowed Launch Checklist (Copy/Paste Ready)
 
@@ -121,18 +119,18 @@ roslaunch scooter_control yolo.launch
 
 ```bash
 cd ~/scroot
-./bridge/ros_sensor_bridge.py
+./bridge/ai_input_bridge.py --mirror-runtime-inputs
 ```
 
-This creates the `ai_input_bridge` node, subscribes to `/sensor_hub/data`, writes `~/scroot/runtime_inputs/{camera.jpg,lidar.npy,sensor_meta.json}`, and throttles logs to once per second. Keep this running so the AI always has fresh fused snapshots.
+This starts the `ai_input_bridge` ROS node, feeds each SensorHub packet into `AutonomyPilot` via `process_sample()`, and mirrors `~/scroot/runtime_inputs/{camera.jpg,lidar.npy,sensor_meta.json}` so downstream tools can watch the same feed. Keep this running so the AI always has fresh fused snapshots.
 
-**Window 7 – Run the autonomy stack (CLI or GUI)**
+**Window 7 – Optional GUI/CLI monitors**
 
-*CLI pilot*
+*CLI pilot replay*
 
 ```bash
 cd ~/scroot
-python3 scroot/main.py
+python3 scroot/main.py --camera ~/scroot/runtime_inputs/camera.jpg --lidar ~/scroot/runtime_inputs/lidar.npy
 ```
 
 *GUI launcher*
@@ -142,7 +140,7 @@ cd ~/scroot
 python3 scroot/scooter_app.py
 ```
 
-Both entry points consume the runtime snapshots generated by Window 6. The GUI defaults to the `~/scroot/runtime_inputs/camera.jpg` source, and the CLI pilot mirrors the same sensor pipeline for headless runs.
+Both entry points tap into the mirrored runtime snapshots generated by Window 6. The GUI defaults to the `~/scroot/runtime_inputs/camera.jpg` source, while the CLI fallback mirrors the same pipeline for offline tests.
 
 Follow the shutdown order in reverse (stop GUI/CLI → bridge → sensor interface → lidar → camera → roscore) to prevent dangling processes. Use `roslaunch scroot_bridge full_system.launch` only when you want ROS to manage every node automatically; the windowed checklist above mirrors the manual sequence requested by the operator.
 
