@@ -1,0 +1,29 @@
+<launch>
+  <arg name="camera_topic" default="/usb_cam/image_raw" />
+  <arg name="lidar_topic" default="/scan" />
+  <arg name="serial_port" default="/dev/ttyUSB0" />
+  <arg name="serial_baudrate" default="1000000" />
+  <arg name="frame_id" default="sensor_hub" />
+
+  <node pkg="usb_cam" type="usb_cam_node" name="usb_cam" output="screen">
+    <param name="video_device" value="/dev/video0" />
+    <param name="pixel_format" value="yuyv" />
+    <param name="image_width" value="1280" />
+    <param name="image_height" value="720" />
+    <param name="framerate" value="30" />
+  </node>
+
+  <node pkg="rplidar_ros" type="rplidarNode" name="rplidarNode" output="screen">
+    <param name="serial_port" value="$(arg serial_port)" />
+    <param name="serial_baudrate" value="$(arg serial_baudrate)" />
+    <param name="frame_id" value="laser" />
+    <param name="inverted" value="false" />
+    <param name="angle_compensate" value="true" />
+  </node>
+
+  <node pkg="sensor_interface" type="sensor_interface_node.py" name="sensor_interface_node" output="screen">
+    <param name="camera_topic" value="$(arg camera_topic)" />
+    <param name="lidar_topic" value="$(arg lidar_topic)" />
+    <param name="frame_id" value="$(arg frame_id)" />
+  </node>
+</launch>

@@ -1,0 +1,19 @@
+<launch>
+  <arg name="camera_topic" default="/usb_cam/image_raw" />
+  <arg name="primary_engine" default="~/models/yolov8n_fp16.engine" />
+  <arg name="secondary_engine" default="~/models/yolov8n_medium.engine" />
+  <arg name="fallback_model" default="yolov8n.pt" />
+  <arg name="confidence" default="0.35" />
+  <arg name="iou" default="0.45" />
+  <arg name="device" default="cuda:0" />
+
+  <node pkg="scooter_control" type="dual_yolo_node.py" name="dual_yolo_node" output="screen">
+    <param name="camera_topic" value="$(arg camera_topic)" />
+    <param name="primary_engine" value="$(arg primary_engine)" />
+    <param name="secondary_engine" value="$(arg secondary_engine)" />
+    <param name="fallback_model" value="$(arg fallback_model)" />
+    <param name="confidence" value="$(arg confidence)" />
+    <param name="iou" value="$(arg iou)" />
+    <param name="device" value="$(arg device)" />
+  </node>
+</launch>

@@ -1,0 +1,6 @@
+<launch>
+  <arg name="output_dir" default="~/scroot/runtime_inputs" />
+  <node pkg="scroot_bridge" type="ai_input_bridge.py" name="ai_input_bridge" output="screen">
+    <param name="output_dir" value="$(arg output_dir)" />
+  </node>
+</launch>

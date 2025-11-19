@@ -11,7 +11,13 @@ This document walks through every artifact under `scroot/`, outlines how the pie
 | `FILEMAP.md` | (This file) Complete description of modules, runtime flow, and dependency rationale. |
 | `setup_scroot.py` | One-shot bootstrap script that creates a virtual environment, installs dependencies, and caches pretrained models. |
 | `autonomy/` | Python package implementing sensing, perception, AI assistants, planning, control, and shared utilities. |
+| `bridge/` | ROS helpers that mirror fused SensorHub topics into the runtime input files consumed by the AI. |
+| `ai/` | Thin wrappers so ROS nodes and notebooks can import the SensorManager-style API without touching internals. |
+| `pilot/` | Convenience exports for the headless pilot CLI (parse args, run loops, expose AutonomyPilot). |
+| `core/` | Shared dataclasses such as `LidarSnapshot`/`PilotTickData` surfaced to bridges and GUIs. |
 | `autonomy_launcher.py` | Single-entry launch script that wires CLI arguments into the `AutonomyPilot` orchestrator and performs dependency checks before boot. |
+| `main.py` | Convenience wrapper so `python3 scroot/main.py` forwards to `autonomy_launcher.py` after dependency checks. |
+| `catkin_ws/` | Source tree for the ROS1 packages (`sensor_interface`, `scooter_control`, `scroot_bridge`) that replicate the operator’s topology. |
 
 ## Dependency Versions and Rationale
 
@@ -38,14 +44,17 @@ Exports convenience imports so downstream code can instantiate `AutonomyPilot` a
 
 ### `autonomy/pilot.py`
 Central orchestrator that binds sensors, perception, lane detection, navigation, arbiter, and control. The `AutonomyPilot` class exposes a `run()` generator yielding raw `ActuatorCommand` tuples (`steer`, `throttle`, `brake`). It handles:
-- Camera startup and graceful shutdown.
+- Polling the runtime camera and LiDAR inputs written by the ROS bridge and shutting them down cleanly.
 - Polling the natural-language `CommandInterface`.
 - Passing frames through the `ObjectDetector` and `LaneDetector`, then into the `Navigator` to compute motion plans.
 - Feeding `NavigationDecision` objects into the `Controller` and deterministic safety arbiter for smoothing and gating.
 - Persisting telemetry JSON and optional visualization overlays.
 
 ### `autonomy/sensors/camera.py`
-Defines `CameraSensor`, a thin wrapper around OpenCV’s `VideoCapture` that exposes a frame iterator with resolution/FPS controls and lifecycle management tailored for USB cameras.
+Defines `CameraSensor`, which now polls `~/scroot/runtime_inputs/camera.jpg` (while still supporting classic `VideoCapture` sources) and exposes a frame iterator with resolution/FPS controls plus throttled warnings when the runtime file has not been populated yet.
+
+### `autonomy/sensors/lidar.py`
+Provides `LidarSensor`, a helper that watches `~/scroot/runtime_inputs/lidar.npy` plus the `sensor_meta.json` emitted by the ROS bridge. Each read returns a `LidarSnapshot` with ranges, scan angles, SensorHub stamp, IMU vector, and ultrasonic distance so both the pilot and GUI stay synchronized without touching ROS directly.
 
 ### `autonomy/perception/object_detection.py`
 Wraps Ultralytics YOLO to produce `PerceptionSummary` objects containing detections, obstacle density metrics, and frame metadata. Configuration toggles allow adjusting model name, confidence, and IoU thresholds.
@@ -80,14 +89,26 @@ The single entry point for operators. Responsibilities:
 - Parses CLI arguments for camera setup, YOLO configuration, arbiter/lane toggles, and logging destinations.
 - Instantiates `AutonomyPilot` and iterates through its command generator, printing each actuator triple alongside arbiter guidance for integration with low-level motor controllers.
 
+## ROS Sensor Bridge (`bridge/ros_sensor_bridge.py`)
+- Initializes the `ai_input_bridge` ROS node, subscribes to the fused `/sensor_hub/data` topic, and converts the camera frame via `CvBridge`.
+- Saves the camera snapshot as `~/scroot/runtime_inputs/camera.jpg`, the LiDAR ranges as `~/scroot/runtime_inputs/lidar.npy`, and the SensorHub metadata (angles, IMU vector, ultrasonic, header stamps) as `sensor_meta.json`, auto-creating the directory when necessary.
+- Accepts a `~output_dir` ROS parameter so launch files (`catkin_ws/src/scroot_bridge/launch/ai_input_bridge.launch`) can place runtime inputs anywhere, and throttles log spam to one message per second.
+- Acts as the glue between ROS and the autonomy stack: once the bridge is running, `python3 scroot/main.py` reads the same files without speaking ROS.
+
+### ROS Workspace (`catkin_ws/src`)
+- `sensor_interface/` – Publishes `sensor_interface/msg/SensorHub` by synchronizing `/usb_cam/image_raw` and `/scan`, logging “Topics detected…” plus “Sensor Interface Node initialized successfully,” and offering `sensor_interface_dynamic.launch` that also boots the `usb_cam` and `rplidar_ros` drivers.
+- `scooter_control/` – Hosts `dual_yolo_node.py`, a dual-context YOLO TensorRT wrapper that emits `/AI/annotated_image` and `/AI/detections` using the `DetectionArray` message. The `yolo.launch` file configures engine paths, device, and thresholds.
+- `scroot_bridge/` – Provides the ROS wrapper for the `~/scroot/bridge/ros_sensor_bridge.py` script and two launch files: `ai_input_bridge.launch` (just the bridge) and `full_system.launch` (camera, LiDAR, SensorHub node, dual YOLO, and bridge).
+
 ## Data Flow Summary
 
-1. `autonomy_launcher.py` constructs `AutonomyPilot` using CLI-specified configuration.
-2. `CameraSensor` streams frames. `ObjectDetector` and `LaneDetector` convert them into obstacle lists plus lane geometry.
-3. `CommandInterface` delivers the latest high-level goal (if any).
-4. `Navigator` evaluates detections, lane estimates, and goals to produce steering/speed intents.
-5. The deterministic arbiter evaluates hazards, lane confidence, and mindset caps to ALLOW/AMEND/BLOCK proposed commands before they reach the `Controller`.
-6. `Controller` generates final actuator outputs, which the launcher prints or forwards.
-7. `AutonomyPilot` continuously exports JSON state for external monitoring and respects stop signals for safe shutdowns.
+1. `bridge/ros_sensor_bridge.py` subscribes to `/sensor_hub/data` and continually updates `~/scroot/runtime_inputs/camera.jpg`, `lidar.npy`, and `sensor_meta.json`.
+2. `autonomy_launcher.py` constructs `AutonomyPilot` using CLI-specified configuration, and the `CameraSensor`/`LidarSensor` pair read the runtime files produced by the bridge.
+3. `ObjectDetector` and `LaneDetector` convert the fused camera frame into obstacle lists plus lane geometry.
+4. `CommandInterface` delivers the latest high-level goal (if any).
+5. `Navigator` evaluates detections, lane estimates, and goals to produce steering/speed intents.
+6. The deterministic arbiter evaluates hazards, lane confidence, and mindset caps to ALLOW/AMEND/BLOCK proposed commands before they reach the `Controller`.
+7. `Controller` generates final actuator outputs, which the launcher prints or forwards.
+8. `AutonomyPilot` continuously exports JSON state for external monitoring and respects stop signals for safe shutdowns, while the GUI/CLI read the `LidarSnapshot` metadata (angles, IMU, ultrasonic) surfaced through `PilotTickData`.
 
 With this map, new engineers can trace any actuator value back to its upstream source and adjust modules without breaking the surrounding system.

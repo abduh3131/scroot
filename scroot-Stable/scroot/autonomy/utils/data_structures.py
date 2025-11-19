@@ -178,6 +178,34 @@ class NavigationSubGoal:
 
 
 @dataclass(frozen=True)
+class LidarSnapshot:
+    """LiDAR ranges plus SensorHub metadata shared with the GUI."""
+
+    ranges: np.ndarray
+    angle_min: float
+    angle_max: float
+    angle_increment: float
+    stamp: float
+    imu_vector: Optional[Tuple[float, float, float]] = None
+    ultrasonic_distance: Optional[float] = None
+
+    def as_array(self) -> np.ndarray:
+        return self.ranges
+
+    def closest_distance(self) -> Optional[float]:
+        mask = np.isfinite(self.ranges) & (self.ranges > 0.0)
+        if not np.any(mask):
+            return None
+        return float(np.min(self.ranges[mask]))
+
+    def median_distance(self) -> Optional[float]:
+        mask = np.isfinite(self.ranges) & (self.ranges > 0.0)
+        if not np.any(mask):
+            return None
+        return float(np.median(self.ranges[mask]))
+
+
+@dataclass(frozen=True)
 class PilotTickData:
     """Snapshot of each control tick for live dashboards/telemetry."""
 
@@ -190,6 +218,7 @@ class PilotTickData:
     caps: SafetyCaps
     gate_tags: Tuple[str, ...]
     companion: Optional[str] = None
+    lidar: Optional[LidarSnapshot] = None
 
 @dataclass(frozen=True)
 class ActuatorCommand:

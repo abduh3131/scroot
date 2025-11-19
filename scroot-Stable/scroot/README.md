@@ -1,21 +1,23 @@
 # Autonomous Scooter Pilot
 
-This package contains a self-contained autonomous driving stack tailored for lightweight vehicles such as scooters. The system is designed to run on NVIDIA Jetson devices as well as standard Ubuntu 24.04 laptops, using a single USB camera for perception. It exposes raw actuator values (`steer`, `throttle`, `brake`) that you can feed directly into your hardware interface. All commands below assume you are inside the `scroot` directory.
+This package contains a self-contained autonomous driving stack tailored for lightweight vehicles such as scooters. The system is designed to run on NVIDIA Jetson devices as well as standard Ubuntu 24.04 laptops and now ingests fused camera + LiDAR feeds from the ROS `sensor_interface_node` via the `/sensor_hub/data` topic. A lightweight bridge writes those SensorHub messages into `~/scroot/runtime_inputs/camera.jpg`, `~/scroot/runtime_inputs/lidar.npy`, and `~/scroot/runtime_inputs/sensor_meta.json`, and every AI module reads from those files so the autonomy loop stays decoupled from individual USB cameras or LiDAR transport layers. It exposes raw actuator values (`steer`, `throttle`, `brake`) that you can feed directly into your hardware interface. All commands below assume you are inside the `scroot` directory.
 
 ## Features
 
-- Camera ingestion pipeline compatible with any USB camera supported by OpenCV.
+- SensorHub ingestion pipeline that consumes the fused camera frame written to `~/scroot/runtime_inputs/camera.jpg` so the pilot no longer depends on a specific USB capture stack.
+- Companion ROS bridge (`scroot/bridge/ros_sensor_bridge.py`) that subscribes to `/sensor_hub/data`, converts the image via `CvBridge`, exports LiDAR ranges to `~/scroot/runtime_inputs/lidar.npy`, writes IMU/ultrasonic metadata to `sensor_meta.json`, and throttles logs to one per second.
+- Mirrored ROS1 workspace under `catkin_ws/src/` that ships the operator’s `sensor_interface` package, the dual YOLO TensorRT node (`scooter_control`), and the launch-ready `scroot_bridge` wrapper so the Jetson can rebuild the entire topology in one go.
 - Real-time object detection powered by Ultralytics YOLO models (default: `yolov8n.pt`).
 - Hybrid navigation that fuses obstacle density analysis with natural-language operator goals.
 - Layered arbitration stack (Navigator → Arbiter → SafetyGate) that can ALLOW, AMEND, or BLOCK commands every control tick.
-- Optional safety mindset profiles that cap maximum speed / clearance and adapt to lane uncertainty or sensor degradation.
+- Optional safety mindset profiles that cap maximum speed / clearance and adapt to perception uncertainty or sensor degradation.
 - Vehicle envelope modeling with user-defined dimensions and camera calibration to keep commands within real clearance limits.
 - Riding companion narration that explains each arbiter decision without blocking the control loop.
-- Advanced bird’s-eye lane detector (mirrors openpilot’s lateral planner) that equalizes lighting, uses a fixed downward-tilted perspective warp tuned for scooter cameras, and feeds curvature/offset data straight back into the pilot.
-- Lane-aware navigator that blends those lane offsets back into the steering bias so the pilot recenters inside bike lanes or shoulders automatically.
+- Advanced bird’s-eye lane detector (mirrors openpilot’s lateral planner) that equalizes lighting, uses a fixed downward-tilted perspective warp tuned for scooter cameras, and only renders a translucent overlay when it actually sees a lane.
+- Lane visualization is purely cosmetic—the AI handles steering/throttle/brake without any lane-bias injection, so control stays consistent even when the detector loses confidence.
 - Configurable lane-warp calibration panel that lets you toggle the automatic horizon trim, manually drag the four normalized warp points, and keep the translucent lane corridor glued to the pavement on any camera height.
 - CPU/GPU acceleration toggle plus an advisor switch so you can run entirely on CPU hardware, enable a Quadro P520 compatibility mode, and silence narration when you need the lightest loop.
-- Live launch dashboard with camera feed, translucent lane-corridor overlays, throttle/brake gauges, actuator readouts, and lane/arbiter status plus a bird’s-eye mini-map.
+- Live launch dashboard with camera feed, optional lane-corridor overlays, and arbiter status plus a bird’s-eye mini-map.
 - Scroll-friendly desktop GUI with Setup, Launch, and Media Test tabs so you can configure hardware, run the live pilot, or upload recorded drives for offline evaluation.
 - Command parser that understands phrases such as "drive to the plaza", "drive 2 m forward", or "turn right" and feeds them into the navigator.
 - Structured telemetry exports (`logs/command_state.json`, `logs/telemetry.jsonl`, `logs/incidents.jsonl`) for auditing and supervision.
@@ -44,9 +46,9 @@ This package contains a self-contained autonomous driving stack tailored for lig
 
    The application now bootstraps itself: it scans your hardware, detects whether you are running native Ubuntu, Ubuntu-on-WSL, or Jetson JetPack, initializes the configuration file if this is your first run, and installs the dependency profile that best matches your compute tier. If the host Python refuses system-wide installs (PEP 668 “externally managed environment”), the bootstrapper automatically provisions `.venv/` and re-runs the install inside that sandbox so the GUI still opens with a single command. Subsequent launches reuse the cached install unless you switch profiles, so you can jump straight into the GUI. You can override the defaults at any time and re-run the setup if you swap hardware. The **Vehicle Envelope** panel lets you describe your scooter/cart, enter width/length/height, set a preferred side margin, and calibrate how wide the vehicle looks in the camera at a known distance so the safety arbiter understands real clearance.
 
-3. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. The live feed shows the current frame, projected trajectory lines, throttle/brake gauges, actuator readouts, the reconstructed lane corridor, and safety-arbiter verdicts. Use the messaging panel to monitor ALLOW/AMEND/BLOCK decisions and send natural-language directives back. The launch controls expose the lane detector profile, Safety Mindset toggle, Ambient cruising toggle, persona picker, a one-click **Acceleration Mode** combo (Auto, CPU-only, CUDA, or the Quadro P520 compatibility path), and an **Enable Advisor** checkbox so you can silence narration when you need the lightest possible loop. Scroll a little farther to the **Lane Alignment & Warp** box to toggle the automatic horizon trim, dial in an extra manual tilt, and edit the four normalized trapezoid points so the overlay hugs whatever camera pitch or handlebar mount you are using.
+3. **Open the *Launch* tab** to start the autonomy stack. Choose your camera index, tweak the frame size or FPS if needed, and press **Start Pilot**. Logs from the pilot appear in real time inside the GUI. The live feed shows the current frame, YOLO bounding boxes, an optional lane corridor overlay (only when detections are confident), safety-arbiter verdicts, and now a LiDAR telemetry row that summarizes the closest/median fused ranges plus ultrasonic distance pulled from `~/scroot/runtime_inputs/lidar.npy` + `sensor_meta.json` so you can verify the SensorHub topic is mirrored correctly. Use the messaging panel to monitor ALLOW/AMEND/BLOCK decisions and send natural-language directives back. The launch controls expose the lane detector profile, Safety Mindset toggle, Ambient cruising toggle, persona picker, a one-click **Acceleration Mode** combo (Auto, CPU-only, CUDA, or the Quadro P520 compatibility path), and an **Enable Advisor** checkbox so you can silence narration when you need the lightest possible loop. Scroll a little farther to the **Lane Alignment & Warp** box to toggle the automatic horizon trim, dial in an extra manual tilt, and edit the four normalized trapezoid points so the overlay hugs whatever camera pitch or handlebar mount you are using.
 
-4. **Use the *Media Test* tab** when you want to sanity-check the AI without riding the scooter. Point it at any road clip (`.mp4`, `.mov`, `.avi`, `.mkv`) or still photo (`.png`, `.jpg`, `.bmp`). The tab reuses your current launch settings, replays the media through the full pilot stack, and writes a new video with the steering vector, throttle/brake bars, lane clearance gauges, directives, and captions burned into every frame. The overlay lane corridor follows the same fixed, downward-tilted calibration as the live feed so the lane band hugs the pavement instead of drifting toward the sky. Pick a folder or filename to save the overlay anywhere you want (or leave it blank to stick with `logs/media_tests/`). The preview panel streams the most recent overlay so you can watch the run while it renders, and a dedicated **Stop** button lets you cancel the export, discard the partial file, and switch clips instantly.
+4. **Use the *Media Test* tab** when you want to sanity-check the AI without riding the scooter. Point it at any road clip (`.mp4`, `.mov`, `.avi`, `.mkv`) or still photo (`.png`, `.jpg`, `.bmp`). The tab reuses your current launch settings, replays the media through the full pilot stack, and writes a new video with YOLO boxes, captions, and (when available) the translucent lane corridor burned into every frame. The overlay lane corridor follows the same fixed, downward-tilted calibration as the live feed so the lane band hugs the pavement instead of drifting toward the sky. Pick a folder or filename to save the overlay anywhere you want (or leave it blank to stick with `logs/media_tests/`). The preview panel streams the most recent overlay so you can watch the run while it renders, and a dedicated **Stop** button lets you cancel the export, discard the partial file, and switch clips instantly.
 
 ### Automated environment detection
 
@@ -80,21 +82,81 @@ If you prefer the CLI or need to run headless, you can still launch the pilot di
 
    On Jetson devices you may prefer the Jetson-specific OpenCV or PyTorch builds. Adjust the requirement accordingly if you already have hardware-accelerated packages installed.
 
-2. **Connect your camera** via USB and determine its index (usually `0`).
-
-3. **Launch the pilot** using the unified launcher:
+2. **Start the SensorHub ROS pipeline** so `/sensor_hub/data` publishes fused frames and ranges:
 
    ```bash
-   python autonomy_launcher.py --camera 0 --lane-sensitivity precision --safety-mindset on --ambient on
+   roslaunch sensor_interface sensor_interface_dynamic.launch
    ```
 
-   The launcher checks dependencies, starts the camera, runs perception and the arbitration stack, and prints actuator commands together with the arbiter verdict and reasons:
+3. **Run the ai_input_bridge** so the fused data is mirrored into `~/scroot/runtime_inputs/`:
+
+   ```bash
+   ./scroot/bridge/ros_sensor_bridge.py
+   ```
+
+   The bridge uses `CvBridge` for the camera frame, saves LiDAR ranges as `runtime_inputs/lidar.npy`, auto-creates the directory, and throttles logs to once per second.
+
+4. **Launch the pilot** using the convenience wrapper (which forwards to `autonomy_launcher.py` after dependency checks):
+
+   ```bash
+   python3 scroot/main.py --lane-sensitivity precision --safety-mindset on --ambient on
+   ```
+
+   The launcher checks dependencies, reads `runtime_inputs/camera.jpg` + `runtime_inputs/lidar.npy`, runs perception and the arbitration stack, and prints actuator commands together with the arbiter verdict and reasons:
 
    ```text
-   time=3.42s steer=+0.120 throttle=0.280 brake=0.000 arbiter=AMEND reasons=lane_bias_right,vru_slow goal="drive 2 m forward"
+   time=3.42s steer=+0.120 throttle=0.280 brake=0.000 arbiter=AMEND reasons=vru_slow goal="drive 2 m forward"
    ```
 
    Press `q` in the visualization window or send `Ctrl+C` to exit.
+
+## ROS Sensor Interface + Launch Files
+
+The repository now mirrors the entire ROS1 side of the integration under `catkin_ws/src/` so a Jetson Orin can rebuild the topology exactly as shown in the reference `rqt_graph` screenshots.
+
+1. **Build the workspace** (once per update):
+
+   ```bash
+   cd ~/scroot/catkin_ws
+   catkin_make
+   source devel/setup.bash
+   ```
+
+2. **Bring the sensor interface online** – `sensor_interface/scripts/sensor_interface_node.py` auto-detects `/usb_cam/image_raw` + `/scan`, logs “Topics detected…” followed by “Sensor Interface Node initialized successfully.” Use the provided launch file to start the entire hardware chain:
+
+   ```bash
+   roslaunch sensor_interface sensor_interface_dynamic.launch
+   ```
+
+   This boots `usb_cam`, `rplidar_ros` (baud `1000000` on `/dev/ttyUSB0`), and the SensorHub publisher.
+
+3. **Run the dual TensorRT YOLO node** – the `scooter_control` package exposes `dual_yolo_node.py` plus `yolo.launch` so you can feed `/AI/annotated_image` and `/AI/detections` to visualization tools without touching the AI pipeline:
+
+   ```bash
+   roslaunch scooter_control yolo.launch
+   # or tweak engines/thresholds:
+   rosrun scooter_control dual_yolo_node.py _primary_engine:=~/models/yolov8n_fp16.engine
+   ```
+
+4. **Start Abdallah’s bridge** – the `scroot_bridge` package wraps `~/scroot/bridge/ros_sensor_bridge.py` so ROS launch files can manage it. Launch it on its own or as part of the combined bring-up:
+
+   ```bash
+   roslaunch scroot_bridge ai_input_bridge.launch               # only the bridge
+   roslaunch scroot_bridge full_system.launch                  # usb_cam + RPLIDAR + SensorHub + YOLO + bridge
+   ```
+
+5. **CLI equivalents for component testing** – if you prefer explicit `rosrun` commands, the expected sequence is:
+
+   ```bash
+   roscore
+   rosrun usb_cam usb_cam_node
+   rosrun rplidar_ros rplidarNode _serial_port:=/dev/ttyUSB0 _serial_baudrate:=1000000
+   rosrun sensor_interface sensor_interface_node.py
+   rosrun scooter_control dual_yolo_node.py
+   rosrun scroot_bridge ai_input_bridge.py
+   ```
+
+   Once `/sensor_hub/data` is flowing you can run `./scroot/bridge/ros_sensor_bridge.py` directly or launch the GUI/CLI (`python3 scroot/main.py`). The AI consumes `~/scroot/runtime_inputs/camera.jpg`, `lidar.npy`, and `sensor_meta.json`, so `rqt_graph` now shows the canonical flow: `/usb_cam` + `/scan` → `sensor_interface_node` → `/sensor_hub/data` → `ai_input_bridge` (writing files) → `python3 scroot/main.py`.
 
 ## Configuration Options
 
@@ -102,7 +164,7 @@ The launcher accepts several runtime flags:
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--camera` | Camera index or video path | `0` |
+| `--camera` | Camera index or image path (defaults to the runtime SensorHub file) | `~/scroot/runtime_inputs/camera.jpg` |
 | `--width` / `--height` | Capture resolution | `1280x720` |
 | `--fps` | Target frame rate | `30` |
 | `--model` | YOLO model file | `yolov8n.pt` |
@@ -124,17 +186,19 @@ The launcher accepts several runtime flags:
 | `--clearance-margin` | Additional lateral buffer per side (meters) | `0.2` |
 | `--calibration-distance` | Distance in meters used to anchor pixel→meter scaling | `2.0` |
 | `--calibration-pixels` | Observed pixel width of the vehicle at the calibration distance | `220.0` |
+| `--lidar` | Path to the LiDAR `.npy` file exported by `ros_sensor_bridge.py` | `~/scroot/runtime_inputs/lidar.npy` |
 
 ## How It Works
 
-1. **CameraSensor** (`autonomy/sensors/camera.py`) continuously streams frames.
-2. **ObjectDetector** (`autonomy/perception/object_detection.py`) identifies obstacles using YOLO and returns bounding boxes. The detector now honors `--device`/Acceleration Mode, so you can run entirely on CPU.
-3. **LaneDetector** (`autonomy/perception/lane_detection.py`) equalizes lighting, runs Sobel/Canny filters, applies a pre-tuned downward-tilted warp, warps the roadway into a cached bird’s-eye view, fits lane lines, and reports curvature/offset values that mirror openpilot’s lateral planner.
-4. **CommandInterface** (`autonomy/ai/command_interface.py`) parses operator phrases and exposes structured goals.
-5. **Navigator** (`autonomy/planning/navigator.py`) blends obstacle density, lane geometry, and the active goal to produce a steering bias, target speed, and goal context. Lane offsets directly nudge the steering bias back toward the center of any detected lane/shoulder.
-6. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
-7. **ControlArbiter** (`autonomy/control/arbitration.py`) fuses the Pilot proposal with the deterministic safety arbiter verdict, Safety Mindset caps, and SafetyGate clamps to publish the final actuator command.
-8. **Riding Companion** (`autonomy/control/companion.py`) narrates each arbiter decision when enabled, while **TelemetryLogger** (`autonomy/control/telemetry.py`) records JSONL logs for auditing.
+1. **CameraSensor** (`autonomy/sensors/camera.py`) continuously polls `runtime_inputs/camera.jpg`, loading each fused frame exported by the ROS bridge.
+2. **LidarSensor** (`autonomy/sensors/lidar.py`) watches `runtime_inputs/lidar.npy` and `sensor_meta.json` so each `LidarSnapshot` includes ranges, scan angles, SensorHub timestamp, IMU vector, and ultrasonic distance for planners, telemetry, and any downstream consumers via `AutonomyPilot.latest_lidar`.
+3. **ObjectDetector** (`autonomy/perception/object_detection.py`) identifies obstacles using YOLO and returns bounding boxes. The detector now honors `--device`/Acceleration Mode, so you can run entirely on CPU.
+4. **LaneDetector** (`autonomy/perception/lane_detection.py`) equalizes lighting, runs Sobel/Canny filters, applies a pre-tuned downward-tilted warp, warps the roadway into a cached bird’s-eye view, fits lane lines, and reports curvature/offset values that mirror openpilot’s lateral planner. The results are used strictly for visualization and logging.
+5. **CommandInterface** (`autonomy/ai/command_interface.py`) parses operator phrases and exposes structured goals.
+6. **Navigator** (`autonomy/planning/navigator.py`) blends obstacle density and the active goal to produce a steering bias, target speed, and goal context—without consuming lane geometry so the AI stays in charge of motion even when no lines are visible.
+7. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
+8. **ControlArbiter** (`autonomy/control/arbitration.py`) fuses the Pilot proposal with the deterministic safety arbiter verdict, Safety Mindset caps, and SafetyGate clamps to publish the final actuator command.
+9. **Riding Companion** (`autonomy/control/companion.py`) narrates each arbiter decision when enabled, while **TelemetryLogger** (`autonomy/control/telemetry.py`) records JSONL logs for auditing.
 
 ### Lane detection and openpilot inspiration
 
@@ -147,7 +211,7 @@ The upgraded lane detector still mirrors openpilot’s lateral planner but now l
 5. **Sliding-window + previous-fit tracker** – The detector gathers lane pixels with the classic openpilot window search and falls back to a “search around poly” mode when lines are faint, smoothing polynomial fits frame-to-frame.
 6. **Reprojection + overlay** – The left/right rails and the center corridor are projected back on top of the live feed, filled with a translucent highlight, and echoed in a mini bird’s-eye inset so you can see what the detector thinks at a glance.
 
-From those fits we derive lane width, curvature, and the scooter’s lateral offset in meters. The navigator feeds those offsets back into the steering bias so the pilot recenters inside any detected lane, while the arbiter tags AMEND/BLOCK events with `lane_bias_right`, `lane_too_narrow`, or `unknown_lane` when confidence drops. Lane-induced hazards are capped (≤0.18) and blended with a higher lane weight so the pilot recenters decisively without panic-braking on every video.
+From those fits we derive lane width, curvature, and the scooter’s lateral offset in meters. Those numbers feed the overlay (so you can see the translucent corridor, rails, and bird’s-eye inset) and telemetry only—the navigator, controller, and arbiter never touch them. If the detector does not see a lane, the overlay simply stays hidden and the AI keeps following YOLO detections plus the active goal.
 
 ## Command Interface Tips
 
@@ -170,11 +234,11 @@ The deterministic safety arbiter inspects each control tick and chooses one of t
 
 Key triggers:
 
-- **Fail-stop** when time-to-collision drops below the configured `ttc_block_s`, hazard level peaks, lane mismatch is detected, sensor confidence collapses, or the vehicle envelope would collide with nearby obstacles/curbs.
-- **Takeover** (AMEND) when a safer lateral bias exists, vulnerable road users are close, the Safety Mindset cap is exceeded, or lateral clearance tightens and the arbiter nudges away from the hazard.
+- **Fail-stop** when time-to-collision drops below the configured `ttc_block_s`, hazard level peaks, sensor confidence collapses, or the vehicle envelope would collide with nearby obstacles/curbs.
+- **Takeover** (AMEND) when vulnerable road users are close, the Safety Mindset cap is exceeded, or lateral clearance tightens and the arbiter nudges away from the hazard.
 - **Timeout** safeguards: if the arbiter exceeds its time budget, the previous verdict persists for one tick, then the system defaults to BLOCK.
 
-The optional Safety Mindset applies contextual caps before arbitration. Profiles such as `cautious_pedestrian`, `low_visibility`, and `worst_case_child` adjust maximum speed and minimum clearance. Uncertainty bias further reduces caps when lane confidence is low or perception is degraded.
+The optional Safety Mindset applies contextual caps before arbitration. Profiles such as `cautious_pedestrian`, `low_visibility`, and `worst_case_child` adjust maximum speed and minimum clearance. Uncertainty bias further reduces caps whenever perception confidence is degraded.
 
 Ambient mode gates motion when no explicit goal is set—movement occurs only when the arbiter returns ALLOW/AMEND, and throttle is limited to a gentle cruise. The riding companion narrates decisions every ≥2 s (e.g., “Fail-stop: pedestrian crossing ahead”).
 
@@ -186,15 +250,13 @@ Ambient mode gates motion when no explicit goal is set—movement occurs only wh
 | Scenario | Expected Behavior |
 | --- | --- |
 | Obstacle 1.5 m ahead at cruising speed | Arbiter emits `BLOCK` within one tick, SafetyGate holds full brake until obstacle clears + debounce. Logged with reason `ttc_low` and incident entry. |
-| Bike lane available on the right | Lane detector spots extra clearance, arbiter issues `AMEND` steering bias right with reduced throttle (`lane_bias_right`), SafetyGate publishes the amended command. |
 | Forced arbiter timeout | Latency budget exceeded → previous verdict reused for ≤1 tick, then `BLOCK` with reason `timeout`. |
 | Safety Mindset toggle | With mindset OFF, throttle follows Pilot target. Turning mindset ON lowers `caps_speed` and logs the active profile. |
-| Ambient, uncertain lane | Low lane confidence with ambient ON → Arbiter `BLOCK`, scooter remains stopped until confidence recovers. |
 | Companion narration | Messages such as “Fail-stop: pedestrian crossing ahead” appear in logs no more than once every 2 s. |
 
 ### Telemetry & Incident Logging
 
-- `logs/telemetry.jsonl` records every tick with arbiter decision, reason tags, latency, proposed vs final command, caps, lane context, and navigation sub-goal state.
+- `logs/telemetry.jsonl` records every tick with arbiter decision, reason tags, latency, proposed vs final command, caps, and navigation sub-goal state.
 - `logs/incidents.jsonl` captures each AMEND/BLOCK event with a reference to 5 s pre/post clips (populate the clip fields if you archive video). Use these logs to audit fail-stop coverage and arbiter timing.
 - Vehicle envelope metadata (lane width estimate, left/right clearance, required clearance) is emitted with each tick so you can audit why the arbiter held, amended, or released control.
 
