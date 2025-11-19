@@ -1,0 +1,3 @@
+<launch>
+  <node pkg="sensor_interface" type="visualize_sensor_hub.py" name="visualize_sensor_hub" output="screen"/>
+</launch>
