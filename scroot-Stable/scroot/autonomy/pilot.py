@@ -30,6 +30,7 @@ from autonomy.perception.lane_detection import LaneDetector, LaneDetectorConfig
 from autonomy.perception.object_detection import ObjectDetector, ObjectDetectorConfig
 from autonomy.planning.navigator import Navigator, NavigatorConfig
 from autonomy.sensors.camera import CameraSensor
+from autonomy.sensors.lidar import LidarSensor
 from autonomy.utils.data_structures import (
     ActuatorCommand,
     ArbiterReview,
@@ -46,12 +47,25 @@ from autonomy.utils.data_structures import (
 )
 
 
+def _runtime_input_dir() -> Path:
+    return Path.home() / "scroot" / "runtime_inputs"
+
+
+def _default_camera_source() -> Path:
+    return _runtime_input_dir() / "camera.jpg"
+
+
+def _default_lidar_source() -> Path:
+    return _runtime_input_dir() / "lidar.npy"
+
+
 @dataclass
 class PilotConfig:
-    camera_source: Union[int, str] = 0
+    camera_source: Union[int, str, Path] = field(default_factory=_default_camera_source)
     camera_width: int = 1280
     camera_height: int = 720
     camera_fps: int = 30
+    lidar_source: Path = field(default_factory=_default_lidar_source)
     model_name: str = "yolov8n.pt"
     confidence_threshold: float = 0.3
     iou_threshold: float = 0.4
@@ -94,6 +108,7 @@ class AutonomyPilot:
             height=self.config.camera_height,
             fps=self.config.camera_fps,
         )
+        self._lidar = LidarSensor(self.config.lidar_source)
         self._vehicle = VehicleEnvelope(
             width_m=self.config.vehicle_width_m,
             length_m=self.config.vehicle_length_m,
@@ -129,6 +144,7 @@ class AutonomyPilot:
         self._latest_subgoal: Optional[NavigationSubGoal] = None
         self._latest_companion: Optional[str] = None
         self._latest_lane: Optional[LaneEstimate] = None
+        self._latest_lidar: Optional[np.ndarray] = None
 
         if self.config.visualize or self.config.command_state_path:
             self.config.log_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +197,10 @@ class AutonomyPilot:
     def latest_lane(self) -> Optional[LaneEstimate]:
         return self._latest_lane
 
+    @property
+    def latest_lidar(self) -> Optional[np.ndarray]:
+        return self._latest_lidar
+
     def run(self) -> Iterator[ActuatorCommand]:
         logging.info("Starting autonomous pilot loop")
         self._running = True
@@ -196,6 +216,10 @@ class AutonomyPilot:
             if self._command_interface:
                 current_command = self._command_interface.poll()
 
+            lidar_success, lidar_ranges = self._lidar.read()
+            if lidar_success and lidar_ranges is not None:
+                self._latest_lidar = lidar_ranges
+
             lane_estimate = self._lane_detector.analyze(frame)
             self._latest_lane = lane_estimate
 
@@ -204,7 +228,7 @@ class AutonomyPilot:
                 perception_summary.objects,
                 perception_summary.frame_size,
                 current_command,
-                lane_estimate=lane_estimate,
+                lane_estimate=None,
             )
 
             if current_command and current_command.command_type == "stop":
@@ -263,10 +287,6 @@ class AutonomyPilot:
                 overlay_frame = self._compose_overlay(
                     frame,
                     perception_summary,
-                    decision,
-                    command,
-                    arbitration,
-                    caps,
                     lane_estimate,
                 )
 
@@ -307,93 +327,28 @@ class AutonomyPilot:
         self,
         frame: np.ndarray,
         perception: PerceptionSummary,
-        decision: NavigationDecision,
-        command: ActuatorCommand,
-        arbitration,
-        caps: SafetyCaps,
         lane_estimate: Optional[LaneEstimate],
     ) -> np.ndarray:
+        """Render perception overlays while keeping the raw camera feed untouched."""
+
         overlay = frame.copy()
         overlay = self._detector.draw_detections(overlay, perception.objects)
-        height, width = overlay.shape[:2]
-        base_y = height - 20
-        path_length = max(40, int(height * 0.45))
-        steer_offset = int(command.steer * width * 0.25)
-        half_span = max(20, int(width * 0.12))
-        top_y = max(20, base_y - path_length)
-        center_x = width // 2
 
-        cv2.line(overlay, (center_x, base_y), (center_x + steer_offset, top_y), (255, 255, 0), 3)
-        cv2.line(
-            overlay,
-            (center_x - half_span, base_y),
-            (center_x - half_span + steer_offset, top_y),
-            (0, 255, 0),
-            2,
-        )
-        cv2.line(
-            overlay,
-            (center_x + half_span, base_y),
-            (center_x + half_span + steer_offset, top_y),
-            (0, 255, 0),
-            2,
-        )
+        if not lane_estimate:
+            return overlay
 
-        bar_height = max(50, int(height * 0.2))
-        bar_width = max(14, int(width * 0.025))
-        throttle_x = 20
-        throttle_y_top = base_y - bar_height
-        throttle_level = int(bar_height * max(0.0, min(1.0, command.throttle)))
-        throttle_fill_top = base_y - throttle_level
-        cv2.rectangle(overlay, (throttle_x, throttle_y_top), (throttle_x + bar_width, base_y), (70, 70, 70), 2)
-        cv2.rectangle(
-            overlay,
-            (throttle_x + 2, throttle_fill_top),
-            (throttle_x + bar_width - 2, base_y - 2),
-            (40, 200, 40),
-            -1,
-        )
-        cv2.putText(
-            overlay,
-            "TH",
-            (throttle_x, throttle_y_top - 6),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            1,
-        )
+        lane_layer = np.zeros_like(overlay)
 
-        brake_x = throttle_x + bar_width + 16
-        brake_y_top = base_y - bar_height
-        brake_level = int(bar_height * max(0.0, min(1.0, command.brake)))
-        brake_fill_top = base_y - brake_level
-        cv2.rectangle(overlay, (brake_x, brake_y_top), (brake_x + bar_width, base_y), (70, 70, 70), 2)
-        cv2.rectangle(
-            overlay,
-            (brake_x + 2, brake_fill_top),
-            (brake_x + bar_width - 2, base_y - 2),
-            (20, 20, 220),
-            -1,
-        )
-        cv2.putText(
-            overlay,
-            "BR",
-            (brake_x, brake_y_top - 6),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            1,
-        )
+        if lane_estimate.lane_area:
+            cv2.fillPoly(lane_layer, [np.array(lane_estimate.lane_area)], (40, 200, 220))
+            overlay = cv2.addWeighted(overlay, 1.0, lane_layer, 0.35, 0)
 
-        if lane_estimate:
-            if lane_estimate.lane_area:
-                lane_layer = np.zeros_like(overlay)
-                cv2.fillPoly(lane_layer, [np.array(lane_estimate.lane_area)], (40, 200, 220))
-                overlay = cv2.addWeighted(overlay, 1.0, lane_layer, 0.35, 0)
-            if lane_estimate.points_left:
-                cv2.polylines(overlay, [np.array(lane_estimate.points_left)], False, (255, 215, 0), 2)
-            if lane_estimate.points_right:
-                cv2.polylines(overlay, [np.array(lane_estimate.points_right)], False, (0, 191, 255), 2)
+        if lane_estimate.points_left:
+            cv2.polylines(overlay, [np.array(lane_estimate.points_left)], False, (255, 215, 0), 2)
+        if lane_estimate.points_right:
+            cv2.polylines(overlay, [np.array(lane_estimate.points_right)], False, (0, 191, 255), 2)
+
+        if lane_estimate.points_left and lane_estimate.points_right:
             center_path = []
             for left_pt, right_pt in zip(lane_estimate.points_left, lane_estimate.points_right):
                 cx = int((left_pt[0] + right_pt[0]) / 2)
@@ -402,94 +357,33 @@ class AutonomyPilot:
             if center_path:
                 cv2.polylines(overlay, [np.array(center_path)], False, (102, 255, 102), 2)
 
-            if lane_estimate.birdseye_outline:
-                inset_height = max(80, height // 5)
-                inset_width = max(80, width // 6)
-                inset = np.zeros((inset_height, inset_width, 3), dtype=np.uint8)
-                bev_array = np.array(lane_estimate.birdseye_outline, dtype=np.float32)
-                max_x = max(1.0, float(np.max(bev_array[:, 0])))
-                max_y = max(1.0, float(np.max(bev_array[:, 1])))
-                scale_x = inset_width / max_x
-                scale_y = inset_height / max_y
-                bev_scaled = np.array(
-                    [
-                        (
-                            int(pt[0] * scale_x),
-                            int(inset_height - 1 - pt[1] * scale_y),
-                        )
-                        for pt in lane_estimate.birdseye_outline
-                    ]
-                )
-                if bev_scaled.size:
-                    cv2.fillPoly(inset, [bev_scaled], (0, 120, 180))
-                    cv2.polylines(inset, [bev_scaled], True, (0, 255, 180), 1)
-                    inset_x = width - inset_width - 12
-                    inset_y = 12
-                    roi = overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width]
-                    blended = cv2.addWeighted(roi, 0.65, inset, 0.35, 0)
-                    overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width] = blended
-
-        review = getattr(arbitration, "review", None)
-        if review:
-            color_map = {
-                ArbiterVerdict.ALLOW: (60, 160, 60),
-                ArbiterVerdict.AMEND: (0, 165, 255),
-                ArbiterVerdict.BLOCK: (0, 0, 255),
-            }
-            header = overlay.copy()
-            cv2.rectangle(header, (0, 0), (width, 70), color_map.get(review.verdict, (90, 90, 90)), -1)
-            overlay = cv2.addWeighted(header, 0.3, overlay, 0.7, 0)
-            summary = f"{review.verdict.value}: {', '.join(review.reason_tags)}"
-            cv2.putText(
-                overlay,
-                summary,
-                (12, 36),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
+        if lane_estimate.birdseye_outline:
+            height, width = overlay.shape[:2]
+            inset_height = max(80, height // 5)
+            inset_width = max(80, width // 6)
+            inset = np.zeros((inset_height, inset_width, 3), dtype=np.uint8)
+            bev_array = np.array(lane_estimate.birdseye_outline, dtype=np.float32)
+            max_x = max(1.0, float(np.max(bev_array[:, 0])))
+            max_y = max(1.0, float(np.max(bev_array[:, 1])))
+            scale_x = inset_width / max_x
+            scale_y = inset_height / max_y
+            bev_scaled = np.array(
+                [
+                    (
+                        int(pt[0] * scale_x),
+                        int(inset_height - 1 - pt[1] * scale_y),
+                    )
+                    for pt in lane_estimate.birdseye_outline
+                ]
             )
-            cv2.putText(
-                overlay,
-                f"Latency {review.latency_ms:.1f} ms",
-                (12, 62),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (240, 240, 240),
-                1,
-            )
-
-        info_lines = [
-            f"Steer {command.steer:+.2f}",
-            f"Throttle {command.throttle:.2f} Brake {command.brake:.2f}",
-            f"Desired {decision.desired_speed:.1f} m/s",
-        ]
-        if decision.goal_context:
-            info_lines.append(f"Goal {decision.goal_context}")
-        if caps and caps.active:
-            info_lines.append(
-                f"Caps {caps.source}: ≤{caps.max_speed_mps:.1f}m/s, ≥{caps.min_clearance_m:.1f}m"
-            )
-        if lane_estimate:
-            info_lines.append(
-                f"Lane {lane_estimate.lane_type} conf={lane_estimate.confidence:.2f} off={lane_estimate.lateral_offset_m:+.2f}m"
-            )
-            if lane_estimate.curvature_m:
-                info_lines.append(f"Curvature ~{lane_estimate.curvature_m:.0f} m")
-        gate_tags = getattr(arbitration, "gate_tags", ())
-        if gate_tags:
-            info_lines.append("Gate " + ", ".join(gate_tags))
-
-        for idx, text in enumerate(info_lines):
-            cv2.putText(
-                overlay,
-                text,
-                (throttle_x + 2 * bar_width + 40, 30 + idx * 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-            )
+            if bev_scaled.size:
+                cv2.fillPoly(inset, [bev_scaled], (0, 120, 180))
+                cv2.polylines(inset, [bev_scaled], True, (0, 255, 180), 1)
+                inset_x = width - inset_width - 12
+                inset_y = 12
+                roi = overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width]
+                blended = cv2.addWeighted(roi, 0.65, inset, 0.35, 0)
+                overlay[inset_y : inset_y + inset_height, inset_x : inset_x + inset_width] = blended
 
         return overlay
 
@@ -593,7 +487,11 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
     import argparse
 
     parser = argparse.ArgumentParser(description="Autonomous scooter pilot")
-    parser.add_argument("--camera", default=0, help="Camera source index or path")
+    parser.add_argument(
+        "--camera",
+        default=str(_default_camera_source()),
+        help="Camera source index or path (defaults to runtime_inputs/camera.jpg)",
+    )
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=30)
@@ -683,11 +581,14 @@ def parse_args(argv: Optional[list[str]] = None) -> PilotConfig:
         lane_detector.min_confidence = 0.25
         lane_detector.smoothing = 0.4
 
+    lidar_path = Path(args.lidar).expanduser()
+
     return PilotConfig(
         camera_source=args.camera,
         camera_width=args.width,
         camera_height=args.height,
         camera_fps=args.fps,
+        lidar_source=lidar_path,
         model_name=args.model,
         confidence_threshold=args.confidence,
         iou_threshold=args.iou,

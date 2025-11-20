@@ -1,0 +1,32 @@
+<launch>
+  <!-- Disable simulation time -->
+  <param name="use_sim_time" value="false"/>
+
+  <!-- === 1. RPLidar Node === -->
+  <node pkg="rplidar_ros" type="rplidarNode" name="rplidar_node" output="screen">
+    <param name="serial_port" value="/dev/ttyUSB0"/>   <!-- change if needed -->
+    <param name="serial_baudrate" value="1000000"/>
+    <param name="frame_id" value="laser_frame"/>
+    <param name="angle_compensate" value="true"/>
+  </node>
+
+  <!-- === 2. Static Transform (base_link ↔ laser_frame) === -->
+  <node pkg="tf" type="static_transform_publisher" name="laser_to_base_tf"
+        args="0 0 0 0 0 0 base_link laser_frame 10"/>
+
+  <!-- === 3. LaserScan → PointCloud2 === -->
+  <node pkg="laser_filters" type="scan_to_cloud_filter_chain" name="scan_to_cloud" output="screen">
+    <param name="target_frame" value="base_link"/>
+    <param name="min_range" value="0.05"/>
+    <param name="max_range" value="18.0"/>
+    <param name="tolerance" value="0.05"/>
+    <remap from="scan" to="/scan"/>
+    <remap from="cloud" to="/cloud"/>
+  </node>
+
+  <!-- === 4. Save PointCloud === -->
+  <node pkg="pcl_ros" type="pointcloud_to_pcd" name="pointcloud_saver" output="screen">
+    <remap from="input" to="/cloud"/>
+    <param name="prefix" value="$(env HOME)/lidar_output"/>
+  </node>
+</launch>

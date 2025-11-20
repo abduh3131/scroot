@@ -1,0 +1,9 @@
+scan_to_cloud_filter_chain:
+  - name: laser_scan_to_point_cloud
+    type: laser_filters/LaserScanToPointCloudFilter
+    params:
+      target_frame: base_link
+      high_fidelity: false
+      min_range: 0.05
+      max_range: 18.0
+      tolerance: 0.1           # increased tolerance to allow small timing drift

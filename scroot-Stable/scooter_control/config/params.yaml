@@ -1,0 +1,38 @@
+# Configuration parameters for the scooter_control package
+
+# --- Cruise Control Node ---
+cruise_control:
+  target_speed: 1.5      # m/s, desired cruising speed
+  slowdown_distance: 3.0 # m, distance at which to start slowing down
+  stop_distance: 0.5     # m, distance at which to issue a full stop
+  lidar_frontal_angle: 20.0 # degrees, +/- angle from center to check for obstacles
+
+# --- Lane Assist Node ---
+lane_assist:
+  # For OpenCV-based lane detection
+  hsv_lower_thresh: [0, 0, 180]   # Lower HSV threshold for white/yellow lines
+  hsv_upper_thresh: [255, 40, 255] # Upper HSV threshold
+  steering_gain: 0.5             # Proportional gain for steering correction
+  max_steering_angle: 0.52         # Radians (~30 degrees), max correction angle
+
+# --- Object Avoidance Node ---
+object_avoidance:
+  lidar_arc_angle: 180.0 # degrees, the total field of view to check for avoidance paths
+  smoothing_factor: 0.2  # Factor for exponential moving average to smooth steering (0-1)
+  critical_obstacle_distance: 1.5 # m, distance within which avoidance takes high priority
+
+# --- Dual YOLO Node ---
+dual_yolo:
+  yolo_s_frame_interval: 3 # Run YOLOv8s every Nth frame
+  confidence_threshold_n: 0.4 # Confidence threshold for YOLOv8n
+  confidence_threshold_s: 0.6 # Confidence threshold for YOLOv8s
+  iou_threshold_fusion: 0.7 # IoU threshold to consider two boxes the same object
+
+# --- Safety Supervisor Node ---
+safety_supervisor:
+  emergency_stop_distance: 0.3 # m, absolute minimum distance to any LiDAR point
+  sensor_timeout: 0.5          # seconds, max time between sensor messages before stop
+  
+# --- Command Arbitrator Node ---
+command_arbitrator:
+  obstacle_timeout: 1.0 # seconds, how long to remember an obstacle for avoidance priority
