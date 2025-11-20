@@ -22,23 +22,44 @@ from autonomy.app.environment import (
 from autonomy.app.hardware import detect_hardware
 from autonomy.app.profiles import (
     DEPENDENCY_PROFILES,
-    LANE_PROFILES,
     MODEL_PROFILES,
     recommend_profiles,
 )
-from autonomy.app.state import AppState, AppStateManager, DEFAULT_LANE_SRC_POINTS
+from autonomy.app.state import AppState, AppStateManager
 from autonomy.control.config import NavigationIntentConfig, SafetyMindsetConfig
 from autonomy.pilot import AutonomyPilot, PilotConfig
-from autonomy.perception.lane_detection import LaneDetectorConfig
-from autonomy.utils.data_structures import PilotTickData
+from autonomy.utils.data_structures import LidarSnapshot, PilotTickData
 
 
-ACCELERATION_CHOICES = ["auto", "cpu", "cuda", "quadro_p520"]
+def summarize_lidar_ranges(snapshot: Optional[LidarSnapshot]) -> tuple[str, Optional[float], Optional[float]]:
+    """Return LiDAR summary text, closest hit, and ultrasonic reading."""
+
+    if snapshot is None:
+        return "n/a", None, None
+    ranges = snapshot.ranges
+    try:
+        values = np.asarray(ranges, dtype=np.float32).reshape(-1)
+    except Exception:
+        return "n/a", None, snapshot.ultrasonic_distance
+    if values.size == 0:
+        return "n/a", None, snapshot.ultrasonic_distance
+    mask = np.isfinite(values) & (values > 0.0)
+    if not np.any(mask):
+        return "n/a", None, snapshot.ultrasonic_distance
+    filtered = values[mask]
+    closest = float(np.min(filtered))
+    median = float(np.median(filtered))
+    summary = f"{closest:.2f} m min | {median:.2f} m med"
+    if snapshot.ultrasonic_distance is not None and snapshot.ultrasonic_distance > 0.0:
+        summary += f" | US {snapshot.ultrasonic_distance:.2f} m"
+    return summary, closest, snapshot.ultrasonic_distance
+
+
+ACCELERATION_CHOICES = ["auto", "cuda", "cpu"]
 
 ACCELERATION_NOTES = {
     "cpu": "CPU-only mode enabled; YOLO will stay off CUDA for this run.",
     "cuda": "Explicit CUDA acceleration requested; ensure NVIDIA drivers are available.",
-    "quadro_p520": "Quadro P520 compatibility mode enabled; YOLO targets cuda:0 with conservative timing.",
 }
 
 
@@ -74,17 +95,11 @@ class PilotRunner(threading.Thread):
                     break
                 elapsed = time.time() - start
                 goal = ""
-                lane_status = ""
                 review = None
                 companion = ""
                 decision = self._pilot.latest_decision
                 if decision:
                     goal = decision.goal_context or ""
-                    meta = decision.metadata if isinstance(decision.metadata, dict) else {}
-                    conf = meta.get("lane_confidence") if isinstance(meta, dict) else None
-                    offset = meta.get("lane_offset_m") if isinstance(meta, dict) else None
-                    if isinstance(conf, (float, int)) and isinstance(offset, (float, int)):
-                        lane_status = f" lane={float(conf):.2f} off={float(offset):+.2f}m"
                 if hasattr(self._pilot, "latest_review"):
                     review = self._pilot.latest_review
                 if hasattr(self._pilot, "latest_companion") and self._pilot.latest_companion:
@@ -95,8 +110,13 @@ class PilotRunner(threading.Thread):
                 )
                 if goal:
                     line += f" goal={goal}"
-                if lane_status:
-                    line += lane_status
+                lidar_summary, _, ultrasonic = summarize_lidar_ranges(
+                    self._pilot.latest_lidar if self._pilot else None
+                )
+                if lidar_summary != "n/a":
+                    line += f" lidar={lidar_summary}"
+                if ultrasonic and ultrasonic > 0.0:
+                    line += f" us={ultrasonic:.2f}m"
                 if review:
                     line += f" arbiter={review.verdict.value}"
                     if review.reason_tags:
@@ -319,16 +339,16 @@ class ScooterApp(tk.Tk):
         self._media_test_photo: Optional[ImageTk.PhotoImage] = None
         self._last_tick_time: float = 0.0
         self._last_arbiter_verdict: str = ""
-        self._last_lane_summary: str = ""
         self._last_companion: str = ""
-
-        self.lane_point_vars: list[tuple[tk.DoubleVar, tk.DoubleVar]] = []
+        self._last_lidar_summary: str = ""
+        self._auto_connect_enabled: bool = True
+        self._last_auto_log: float = 0.0
 
         self._build_ui()
         self._render_hardware_summary()
         self._update_model_description()
         self._update_dependency_description()
-        self._update_lane_profile_description()
+        self.after(1000, self._maybe_autostart)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -336,13 +356,6 @@ class ScooterApp(tk.Tk):
         """Tune defaults for Jetson Orin platforms to prioritise smooth operation."""
 
         if not self._is_jetson_orin:
-            tuned = False
-            gpu_name = (self.hardware_profile.gpu_name or "").lower()
-            if "quadro p520" in gpu_name and self.app_state.acceleration_mode == "auto":
-                self.app_state.acceleration_mode = "quadro_p520"
-                tuned = True
-            if tuned and not initial:
-                self.state_manager.save_state(self.app_state)
             return
 
         tuned = False
@@ -362,9 +375,6 @@ class ScooterApp(tk.Tk):
             tuned = True
 
         if initial:
-            if self.app_state.lane_profile != "precision":
-                self.app_state.lane_profile = "precision"
-                tuned = True
             if self.app_state.resolution_width != 960:
                 self.app_state.resolution_width = 960
                 tuned = True
@@ -536,9 +546,9 @@ class ScooterApp(tk.Tk):
 
         ttk.Label(self.run_frame, text="Camera Source", style="Body.TLabel").grid(row=1, column=0, sticky="w")
         self.camera_var = tk.StringVar(value=self.app_state.camera_source)
-        ttk.Entry(self.run_frame, textvariable=self.camera_var, width=10).grid(
-            row=1, column=1, sticky="w"
-        )
+        ttk.Entry(
+            self.run_frame, textvariable=self.camera_var, width=28, state="readonly"
+        ).grid(row=1, column=1, columnspan=2, sticky="w")
 
         ttk.Label(self.run_frame, text="Resolution", style="Body.TLabel").grid(row=2, column=0, sticky="w")
         self.width_var = tk.IntVar(value=self.app_state.resolution_width)
@@ -562,10 +572,7 @@ class ScooterApp(tk.Tk):
         self.acceleration_combo.grid(row=4, column=1, sticky="w")
         ttk.Label(
             self.run_frame,
-            text=(
-                "Auto uses GPU when present; CPU forces a CUDA-free run; the Quadro P520 option "
-                "targets cuda:0 with conservative timing."
-            ),
+            text=("Auto picks CUDA on Jetson; use CPU only when debugging."),
             style="Body.TLabel",
             wraplength=360,
             justify=tk.LEFT,
@@ -576,42 +583,23 @@ class ScooterApp(tk.Tk):
             row=5, column=0, columnspan=2, sticky="w"
         )
 
-        ttk.Label(self.run_frame, text="Lane Detector", style="Body.TLabel").grid(row=6, column=0, sticky="w")
-        self.lane_profile_var = tk.StringVar(value=self.app_state.lane_profile)
-        self.lane_profile_combo = ttk.Combobox(
-            self.run_frame,
-            textvariable=self.lane_profile_var,
-            values=list(LANE_PROFILES.keys()),
-            state="readonly",
-        )
-        self.lane_profile_combo.grid(row=6, column=1, sticky="w")
-        self.lane_profile_combo.bind(
-            "<<ComboboxSelected>>", lambda _event: self._update_lane_profile_description()
-        )
-        self.lane_profile_desc = ttk.Label(
-            self.run_frame, style="Body.TLabel", wraplength=400, justify=tk.LEFT
-        )
-        self.lane_profile_desc.grid(row=6, column=2, columnspan=2, sticky="w", padx=12)
-
-        self._build_lane_calibration_section(row=7)
-
-        ttk.Label(self.run_frame, text="Safety Mindset", style="Body.TLabel").grid(row=8, column=0, sticky="w")
+        ttk.Label(self.run_frame, text="Safety Mindset", style="Body.TLabel").grid(row=6, column=0, sticky="w")
         self.mindset_var = tk.StringVar(value=self.app_state.safety_mindset)
         ttk.Combobox(
             self.run_frame,
             textvariable=self.mindset_var,
             values=["off", "on"],
             state="readonly",
-        ).grid(row=8, column=1, sticky="w")
+        ).grid(row=6, column=1, sticky="w")
 
-        ttk.Label(self.run_frame, text="Ambient Mode", style="Body.TLabel").grid(row=9, column=0, sticky="w")
+        ttk.Label(self.run_frame, text="Ambient Mode", style="Body.TLabel").grid(row=7, column=0, sticky="w")
         self.ambient_var = tk.StringVar(value=self.app_state.ambient_mode)
         ttk.Combobox(
             self.run_frame,
             textvariable=self.ambient_var,
             values=["on", "off"],
             state="readonly",
-        ).grid(row=9, column=1, sticky="w")
+        ).grid(row=7, column=1, sticky="w")
 
         self.advisor_var = tk.BooleanVar(value=self.app_state.advisor_enabled)
         ttk.Checkbutton(
@@ -619,9 +607,9 @@ class ScooterApp(tk.Tk):
             text="Enable Advisor Narration",
             variable=self.advisor_var,
             command=self._update_persona_state,
-        ).grid(row=10, column=0, columnspan=2, sticky="w")
+        ).grid(row=8, column=0, columnspan=2, sticky="w")
 
-        ttk.Label(self.run_frame, text="Companion Persona", style="Body.TLabel").grid(row=11, column=0, sticky="w")
+        ttk.Label(self.run_frame, text="Companion Persona", style="Body.TLabel").grid(row=9, column=0, sticky="w")
         self.persona_var = tk.StringVar(value=self.app_state.persona)
         self.persona_combo = ttk.Combobox(
             self.run_frame,
@@ -629,24 +617,26 @@ class ScooterApp(tk.Tk):
             values=["calm_safe", "smart_scout", "playful"],
             state="readonly",
         )
-        self.persona_combo.grid(row=11, column=1, sticky="w")
+        self.persona_combo.grid(row=9, column=1, sticky="w")
         self._update_persona_state()
 
-        self.start_button = ttk.Button(self.run_frame, text="Start Pilot", command=self._start_pilot)
-        self.start_button.grid(row=12, column=0, pady=(24, 0), sticky="w")
+        self.start_button = ttk.Button(
+            self.run_frame, text="Start Pilot", command=lambda: self._start_pilot()
+        )
+        self.start_button.grid(row=10, column=0, pady=(24, 0), sticky="w")
 
         self.stop_button = ttk.Button(
             self.run_frame, text="Stop Pilot", command=self._stop_pilot, state=tk.DISABLED
         )
-        self.stop_button.grid(row=12, column=1, pady=(24, 0), sticky="w")
+        self.stop_button.grid(row=10, column=1, pady=(24, 0), sticky="w")
 
         self.video_frame = ttk.LabelFrame(self.run_frame, text="Live Camera & Lane Overlay")
-        self.video_frame.grid(row=13, column=0, columnspan=4, pady=(16, 0), sticky="nsew")
+        self.video_frame.grid(row=11, column=0, columnspan=4, pady=(16, 0), sticky="nsew")
         self.video_label = ttk.Label(self.video_frame, text="Video feed will appear here", anchor="center")
         self.video_label.pack(fill=tk.BOTH, expand=True)
 
         telemetry_frame = ttk.Frame(self.run_frame)
-        telemetry_frame.grid(row=13, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        telemetry_frame.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         telemetry_frame.columnconfigure(1, weight=1)
 
         ttk.Label(telemetry_frame, text="Throttle").grid(row=0, column=0, sticky="w")
@@ -669,9 +659,13 @@ class ScooterApp(tk.Tk):
         self.arbiter_status = tk.StringVar(value="Idle")
         ttk.Label(telemetry_frame, textvariable=self.arbiter_status, width=18).grid(row=1, column=3, sticky="w")
 
-        ttk.Label(telemetry_frame, text="Lane Status").grid(row=1, column=0, sticky="w")
-        self.lane_status = tk.StringVar(value="n/a")
-        ttk.Label(telemetry_frame, textvariable=self.lane_status, width=18).grid(row=1, column=1, sticky="w")
+        ttk.Label(telemetry_frame, text="LiDAR (closest | median | ultrasonic)").grid(
+            row=2, column=0, sticky="w"
+        )
+        self.lidar_status = tk.StringVar(value="n/a")
+        ttk.Label(telemetry_frame, textvariable=self.lidar_status, width=32).grid(
+            row=2, column=1, sticky="w"
+        )
 
         self.message_frame = ttk.LabelFrame(self.run_frame, text="Command Console")
         self.message_frame.grid(row=14, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
@@ -749,9 +743,9 @@ class ScooterApp(tk.Tk):
         )
 
         hint = (
-            "Describe your scooter/cart and provide physical dimensions so the lane detector can"
-            " respect real clearance. Calibration pairs a typical camera distance with the"
-            " apparent width of the vehicle in pixels to ground distance estimates."
+            "Describe your scooter/cart and provide physical dimensions so obstacle clearance"
+            " stays realistic. Calibration pairs a typical camera distance with the apparent"
+            " width of the vehicle in pixels to ground distance estimates."
         )
         ttk.Label(frame, text=hint, style="Body.TLabel", wraplength=720, justify=tk.LEFT).grid(
             row=4, column=0, columnspan=4, sticky="w", pady=(8, 0)
@@ -905,91 +899,6 @@ class ScooterApp(tk.Tk):
         self.test_frame.rowconfigure(9, weight=3)
         self.test_frame.rowconfigure(10, weight=1)
 
-    def _build_lane_calibration_section(self, row: int) -> None:
-        frame = ttk.LabelFrame(self.run_frame, text="Lane Alignment & Warp")
-        frame.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(12, 0))
-        frame.columnconfigure(3, weight=1)
-
-        self.lane_auto_pitch_var = tk.BooleanVar(value=self.app_state.lane_auto_pitch)
-        ttk.Checkbutton(
-            frame,
-            text="Auto horizon trim (keeps overlay glued to the asphalt)",
-            variable=self.lane_auto_pitch_var,
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
-
-        self.lane_horizon_offset_var = tk.DoubleVar(value=self.app_state.lane_horizon_offset)
-        ttk.Label(frame, text="Manual tilt", style="Body.TLabel").grid(row=0, column=2, sticky="e", padx=(8, 4))
-        ttk.Entry(frame, textvariable=self.lane_horizon_offset_var, width=6).grid(row=0, column=3, sticky="w")
-
-        ttk.Label(
-            frame,
-            text="Edit the four normalized source points (0.00 → left/top, 1.00 → right/bottom).",
-            style="Body.TLabel",
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 2))
-
-        points = list(self.app_state.lane_src_points or DEFAULT_LANE_SRC_POINTS)
-        if len(points) != 4:
-            points = list(DEFAULT_LANE_SRC_POINTS)
-        labels = ["Bottom Left", "Bottom Right", "Top Right", "Top Left"]
-        self.lane_point_vars.clear()
-
-        for idx, (label, point) in enumerate(zip(labels, points)):
-            row_offset = 2 + idx // 2
-            col_offset = (idx % 2) * 2
-            ttk.Label(frame, text=label).grid(row=row_offset, column=col_offset, sticky="w", padx=(0, 4))
-            x_var = tk.DoubleVar(value=round(float(point[0]), 3))
-            y_var = tk.DoubleVar(value=round(float(point[1]), 3))
-            ttk.Entry(frame, textvariable=x_var, width=6).grid(row=row_offset, column=col_offset + 1, sticky="w")
-            ttk.Entry(frame, textvariable=y_var, width=6).grid(row=row_offset, column=col_offset + 1, sticky="e", padx=(0, 30))
-            self.lane_point_vars.append((x_var, y_var))
-
-        ttk.Button(frame, text="Reset points", command=self._reset_lane_points).grid(
-            row=4, column=3, sticky="e", pady=(8, 0)
-        )
-
-    def _reset_lane_points(self) -> None:
-        for (x_var, y_var), defaults in zip(self.lane_point_vars, DEFAULT_LANE_SRC_POINTS):
-            x_var.set(round(float(defaults[0]), 3))
-            y_var.set(round(float(defaults[1]), 3))
-
-    def _read_lane_points(self) -> Tuple[Tuple[float, float], ...]:
-        points: list[Tuple[float, float]] = []
-        for x_var, y_var in self.lane_point_vars:
-            try:
-                x_val = float(x_var.get())
-                y_val = float(y_var.get())
-            except (TypeError, ValueError):
-                raise ValueError("Lane warp values must be numeric between 0.0 and 1.0.")
-            if not (0.0 <= x_val <= 1.0 and 0.0 <= y_val <= 1.0):
-                raise ValueError("Lane warp coordinates must stay between 0.0 and 1.0.")
-            points.append((x_val, y_val))
-        if len(points) != 4:
-            raise ValueError("Four lane warp points are required.")
-        return tuple(points)
-
-    def _read_horizon_offset(self) -> float:
-        try:
-            value = float(self.lane_horizon_offset_var.get())
-        except (TypeError, ValueError):
-            raise ValueError("Lane horizon offset must be a number between -0.2 and 0.2.")
-        if not -0.2 <= value <= 0.2:
-            raise ValueError("Lane horizon offset must stay between -0.2 and 0.2.")
-        return value
-
-    def _capture_lane_settings(self, *, show_errors: bool) -> Optional[tuple[Tuple[float, float], ...]]:
-        try:
-            points = self._read_lane_points()
-            horizon_offset = self._read_horizon_offset()
-        except ValueError as exc:
-            if show_errors:
-                messagebox.showerror("Invalid Lane Calibration", str(exc))
-            return None
-
-        self.app_state.lane_src_points = points
-        self.app_state.lane_auto_pitch = bool(self.lane_auto_pitch_var.get())
-        self.app_state.lane_horizon_offset = horizon_offset
-        return points
-
     def _update_persona_state(self) -> None:
         if not hasattr(self, "persona_combo"):
             return
@@ -1105,11 +1014,9 @@ class ScooterApp(tk.Tk):
                 f"steer={payload.command.steer:+.2f} throttle={payload.command.throttle:.2f} "
                 f"brake={payload.command.brake:.2f}"
             )
-            meta = payload.decision.metadata if isinstance(payload.decision.metadata, dict) else {}
-            conf = meta.get("lane_confidence") if isinstance(meta, dict) else None
-            offset = meta.get("lane_offset_m") if isinstance(meta, dict) else None
-            if isinstance(conf, (float, int)) and isinstance(offset, (float, int)):
-                summary += f"\nLane conf={float(conf):.2f} off={float(offset):+.2f}m"
+            lidar_text, _, _ = summarize_lidar_ranges(payload.lidar)
+            if lidar_text != "n/a":
+                summary += f"\nLiDAR {lidar_text}"
             self.test_preview_label.configure(image=self._media_test_photo, text=summary, compound=tk.TOP)
 
         self.after(0, update)
@@ -1178,17 +1085,6 @@ class ScooterApp(tk.Tk):
         text = f"{profile.label}: {profile.description}\n" + "\n".join(profile.requirements)
         self.dependency_desc.configure(text=text)
 
-    def _update_lane_profile_description(self) -> None:
-        key = self.lane_profile_var.get()
-        profile = LANE_PROFILES.get(key, LANE_PROFILES["balanced"])
-        text = (
-            f"{profile.label}: {profile.description}\n"
-            f"Confidence ≥{profile.min_confidence:.2f}, smoothing={profile.smoothing:.2f}\n"
-            f"ROI start {profile.roi_top_ratio:.2f}, auto pitch {'on' if profile.auto_pitch else 'off'}, "
-            f"horizon shift {profile.horizon_offset:+.3f}"
-        )
-        self.lane_profile_desc.configure(text=text)
-
     def _save_setup(self) -> None:
         self._append_setup_log("Saving setup preferences...")
         try:
@@ -1197,12 +1093,8 @@ class ScooterApp(tk.Tk):
             messagebox.showerror("Invalid Input", str(exc))
             self._append_setup_log(f"Failed to save: {exc}")
             return
-        if self._capture_lane_settings(show_errors=True) is None:
-            self._append_setup_log("Lane calibration not saved; fix the highlighted values and try again.")
-            return
         self.app_state.model_profile = self.model_var.get()
         self.app_state.dependency_profile = self.dependency_var.get()
-        self.app_state.lane_profile = self.lane_profile_var.get()
         self.app_state.vehicle_description = self.vehicle_description_var.get().strip() or "Scooter"
         self.app_state.vehicle_width_m = vehicle_settings["width"]
         self.app_state.vehicle_length_m = vehicle_settings["length"]
@@ -1242,16 +1134,44 @@ class ScooterApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _maybe_autostart(self) -> None:
+        if not self._auto_connect_enabled:
+            return
+        running = self.pilot_thread and self.pilot_thread.is_alive()
+        if running:
+            self.after(1000, self._maybe_autostart)
+            return
+        camera_path = Path(self.camera_var.get()).expanduser()
+        lidar_path = camera_path.parent / "lidar.npy"
+        now = time.time()
+        if camera_path.exists():
+            if now - self._last_auto_log > 2.0:
+                self._append_launch_log("Auto-connecting to SensorHub inputs...")
+                self._last_auto_log = now
+            started = self._start_pilot(auto_invoked=True)
+            if started:
+                self.after(1500, self._maybe_autostart)
+                return
+        if lidar_path.exists():
+            # If only LiDAR has arrived, keep polling until camera arrives too.
+            if now - self._last_auto_log > 2.0:
+                self._append_launch_log("Waiting for camera.jpg from SensorHub...")
+                self._last_auto_log = now
+        self.after(1000, self._maybe_autostart)
+
     # ------------------------------------------------------------------
     # Launch tab actions
-    def _start_pilot(self) -> None:
+    def _start_pilot(self, *, auto_invoked: bool = False) -> bool:
         if self.pilot_thread and self.pilot_thread.is_alive():
-            messagebox.showwarning("Pilot", "Pilot is already running.")
-            return
+            if not auto_invoked:
+                messagebox.showwarning("Pilot", "Pilot is already running.")
+            return False
 
-        config_tuple = self._build_pilot_config()
+        config_tuple = self._build_pilot_config(show_errors=not auto_invoked)
         if not config_tuple:
-            return
+            if not auto_invoked:
+                self._append_launch_log("Pilot launch aborted; fix the inputs above.")
+            return False
         config, jetson_note = config_tuple
 
         if jetson_note:
@@ -1274,6 +1194,7 @@ class ScooterApp(tk.Tk):
             tick_callback=self._handle_pilot_tick,
         )
         self.pilot_thread.start()
+        return True
 
     def _stop_pilot(self) -> None:
         if not self.pilot_thread:
@@ -1300,16 +1221,12 @@ class ScooterApp(tk.Tk):
             if show_errors:
                 messagebox.showerror("Invalid Input", str(exc))
             return None
-        lane_points = self._capture_lane_settings(show_errors=show_errors)
-        if lane_points is None:
-            return None
 
         self.app_state.camera_source = self.camera_var.get()
         self.app_state.resolution_width = width
         self.app_state.resolution_height = height
         self.app_state.fps = fps
         self.app_state.enable_visualization = bool(self.visual_var.get())
-        self.app_state.lane_profile = self.lane_profile_var.get()
         self.app_state.safety_mindset = self.mindset_var.get()
         self.app_state.ambient_mode = self.ambient_var.get()
         self.app_state.persona = self.persona_var.get()
@@ -1325,24 +1242,12 @@ class ScooterApp(tk.Tk):
         self.state_manager.save_state(self.app_state)
 
         model_profile = MODEL_PROFILES[self.model_var.get()]
-        lane_profile = LANE_PROFILES.get(self.lane_profile_var.get(), LANE_PROFILES["balanced"])
 
         navigation_intent = NavigationIntentConfig()
         navigation_intent.ambient_mode = self.ambient_var.get() == "on"
 
         safety_mindset = SafetyMindsetConfig()
         safety_mindset.enabled = self.mindset_var.get() == "on"
-
-        lane_detector = LaneDetectorConfig(
-            min_confidence=lane_profile.min_confidence,
-            smoothing=lane_profile.smoothing,
-            roi_top_ratio=lane_profile.roi_top_ratio,
-            adaptive_block_size=lane_profile.adaptive_block_size,
-            adaptive_C=lane_profile.adaptive_C,
-            auto_pitch=bool(self.lane_auto_pitch_var.get()),
-            horizon_offset=self.app_state.lane_horizon_offset,
-        )
-        lane_detector.manual_src_points = lane_points
 
         config = PilotConfig(
             camera_source=self.camera_var.get(),
@@ -1356,7 +1261,6 @@ class ScooterApp(tk.Tk):
             safety_mindset_enabled=safety_mindset.enabled,
             companion_persona=self.persona_var.get(),
             companion_enabled=bool(self.advisor_var.get()),
-            lane_detector=lane_detector,
             detector_device=self.acceleration_var.get(),
             vehicle_description=self.vehicle_description_var.get().strip() or "Scooter",
             vehicle_width_m=vehicle_settings["width"],
@@ -1394,20 +1298,14 @@ class ScooterApp(tk.Tk):
             self.brake_bar["value"] = max(0, min(100, brake * 100.0))
             self.steer_value.set(f"{steer:+.2f}")
 
-            meta = payload.decision.metadata if isinstance(payload.decision.metadata, dict) else {}
-            lane_conf = meta.get("lane_confidence") if isinstance(meta, dict) else None
-            lane_offset = meta.get("lane_offset_m") if isinstance(meta, dict) else None
-            lane_text = "n/a"
-            if isinstance(lane_conf, (float, int)) and isinstance(lane_offset, (float, int)):
-                lane_text = f"{float(lane_conf):.2f} | {float(lane_offset):+.2f} m"
-                if lane_text != self._last_lane_summary:
-                    self._append_message(
-                        f"Lane conf={float(lane_conf):.2f} offset={float(lane_offset):+.2f} m"
-                    )
-                    self._last_lane_summary = lane_text
+            lidar_text, _, _ = summarize_lidar_ranges(payload.lidar)
+            self.lidar_status.set(lidar_text)
+            if lidar_text != "n/a":
+                if lidar_text != self._last_lidar_summary:
+                    self._append_message(f"LiDAR: {lidar_text}")
+                    self._last_lidar_summary = lidar_text
             else:
-                self._last_lane_summary = ""
-            self.lane_status.set(lane_text)
+                self._last_lidar_summary = ""
 
             if payload.review:
                 reason = ", ".join(payload.review.reason_tags)
