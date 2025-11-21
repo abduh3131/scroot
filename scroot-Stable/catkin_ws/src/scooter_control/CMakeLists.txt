@@ -12,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
 add_message_files(
   FILES
   AICommand.msg
+  ActuatorCommand.msg
   YoloDetection.msg
   YoloDetectionArray.msg
   SensorHub.msg
@@ -39,5 +40,6 @@ install(PROGRAMS
   scripts/lane_assist_node.py
   scripts/object_avoidance_node.py
   scripts/safety_supervisor_node.py
+  scripts/planner_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
