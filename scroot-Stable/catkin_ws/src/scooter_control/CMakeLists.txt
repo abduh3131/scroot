@@ -14,6 +14,7 @@ add_message_files(
   FILES
     Detection.msg
     DetectionArray.msg
+    ActuatorCommand.msg
 )
 
 generate_messages(
@@ -34,5 +35,8 @@ catkin_package(
 catkin_install_python(
   PROGRAMS
     scripts/dual_yolo_node.py
+    scripts/sensor_fusion_planner_node.py
+    scripts/controller_node.py
+    scripts/live_overlay_gui.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
