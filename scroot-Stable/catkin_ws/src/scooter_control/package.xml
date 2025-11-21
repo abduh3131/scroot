@@ -2,7 +2,7 @@
 <package format="2">
   <name>scooter_control</name>
   <version>0.1.0</version>
-  <description>Dual YOLO TensorRT node for annotated detections.</description>
+  <description>Lightweight perception, planning, and control nodes for the scooter.</description>
 
   <maintainer email="team@scroot.ai">Scroot Integration</maintainer>
   <license>MIT</license>
@@ -15,6 +15,7 @@
   <build_depend>std_msgs</build_depend>
   <build_depend>geometry_msgs</build_depend>
   <build_depend>cv_bridge</build_depend>
+  <build_depend>sensor_interface</build_depend>
 
   <exec_depend>message_runtime</exec_depend>
   <exec_depend>rospy</exec_depend>
@@ -22,4 +23,5 @@
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>sensor_interface</exec_depend>
 </package>
