@@ -56,6 +56,37 @@ If the host changes (e.g., you move the SD card to a different Jetson or upgrade
 
 If you prefer the CLI or need to run headless, you can still launch the pilot directly.
 
+For a **minimal, CPU-only loop** that streams actuator values to both disk and a USB-connected MCU, use the lightweight pilot:
+
+```bash
+python -m autonomy.simple_cpu_pilot --camera 0 --log-path logs/simple_actuators.jsonl --serial /dev/ttyUSB0
+```
+
+It uses the tiny YOLOv8n model, smooths commands for stable motion, and writes comma-separated `steer,throttle,brake` lines to the serial port while mirroring the same values to the log file for debugging.
+
+### Jetson Nano + Rosmaster one-shot setup
+
+If you are running a Jetson Nano-based Rosmaster cart and are unsure which dependencies are present, the repository includes a bootstrapper that performs every prerequisite step:
+
+```bash
+python setup_jetson_rosmaster.py
+```
+
+The script:
+
+- Installs system packages needed for camera capture and serial access (`python3-venv`, `python3-opencv`, `ffmpeg`, `v4l-utils`, BLAS libraries).
+- Creates `.venv/` with access to JetPack's prebuilt OpenCV and installs NVIDIA's PyTorch/TorchVision wheels for the detected L4T release.
+- Installs the remaining Python requirements and downloads the default YOLOv8n weights so the pilot can start offline.
+
+After the script completes:
+
+```bash
+source .venv/bin/activate
+python -m autonomy.simple_cpu_pilot --camera 0 --serial auto --visualize
+```
+
+`--serial auto` scans `/dev/ttyTHS*`, `/dev/ttyUSB*`, and `/dev/ttyACM*` so the Rosmaster MCU is picked up automatically; pass `--no-auto-serial` if you prefer to pin a specific device.
+
 1. **Install dependencies** (Python 3.10+ recommended):
 
    The easiest path is to reuse the managed environment that the GUI bootstrapper creates.

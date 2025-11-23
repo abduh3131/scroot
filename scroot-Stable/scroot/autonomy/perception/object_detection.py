@@ -21,6 +21,7 @@ class ObjectDetectorConfig:
     model_name: str = "yolov8n.pt"
     confidence_threshold: float = 0.3
     iou_threshold: float = 0.4
+    device: str | None = None
 
 
 class ObjectDetector:
@@ -29,6 +30,8 @@ class ObjectDetector:
     def __init__(self, config: ObjectDetectorConfig | None = None) -> None:
         self.config = config or ObjectDetectorConfig()
         self._model = YOLO(self.config.model_name)
+        if self.config.device:
+            self._model.to(self.config.device)
         self._model.fuse()
 
     def detect(self, frame: np.ndarray) -> PerceptionSummary:
@@ -36,6 +39,7 @@ class ObjectDetector:
             source=frame,
             conf=self.config.confidence_threshold,
             iou=self.config.iou_threshold,
+            device=self.config.device,
             verbose=False,
         )[0]
 

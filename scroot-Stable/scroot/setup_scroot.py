@@ -66,9 +66,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def check_python_version() -> None:
-    if sys.version_info < (3, 10):
+    if sys.version_info < (3, 8):
         raise RuntimeError(
-            "Python 3.10 or newer is required. Current version: "
+            "Python 3.8 or newer is required. Current version: "
             f"{platform.python_version()}"
         )
 
