@@ -1,27 +1,31 @@
 # Self-Contained YOLO Pilot Report
 
 ## Requirements
-- Python 3.9+ on Linux (Ubuntu/Jetson) or Windows 11.
+- Python **3.8+** on Linux (Ubuntu/Jetson) or Windows 11.
 - USB/CSI camera supported by OpenCV.
-- `pip install -r requirements.txt` (installs `ultralytics`, `opencv-python`, `numpy`).
+- `pip install -r requirements.txt` (installs `ultralytics`, `opencv-python`, `numpy`). `ultralytics` will pull a matching `torch` for your platform on first install.
 - Optional ROS 1 publishing: `rospy` and `std_msgs` available in the environment.
-- Jetson note: if `opencv-python` fails to install from wheels, use the preinstalled `python3-opencv` and run `pip install --no-deps ultralytics numpy`.
+- Jetson note: if `opencv-python` wheels fail, keep JetPack's `python3-opencv` and run `pip install --no-deps ultralytics numpy`.
 
-## Setup
-1. From this folder, create and activate a virtual environment (recommended):
+## Setup (from this folder)
+1. Verify you are using Python 3.8 or newer:
+   ```bash
+   python --version
+   ```
+2. Create and activate a virtual environment (recommended):
    ```bash
    python -m venv .venv
    source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
    ```
-2. Install dependencies and let Ultralytics pull the default YOLO weights on first run:
+3. Install dependencies and let Ultralytics fetch YOLO weights on first run:
    ```bash
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
-3. Plug in the camera. For Jetson/CSI cams you can use a GStreamer string via `--pipeline` instead of `--camera`.
+4. Plug in the camera. For Jetson/CSI cams you can supply a GStreamer string via `--pipeline` instead of `--camera`.
 
 ## Running the pilot
-Run from this folder so imports resolve:
+Run directly from this folder so imports resolve:
 ```bash
 python -m autonomy.pilot --model yolov8n.pt --device auto --camera 0 --display --log actuator_log.jsonl
 ```
