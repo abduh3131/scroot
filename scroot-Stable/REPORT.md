@@ -1,37 +1,43 @@
-# Development Report
+# Self-Contained YOLO Pilot Report
 
-## Objective
-Extend the autonomous scooter pilot with a multimodal large-model co-driver, a natural-language command interface, and accompanying documentation while keeping the stack ready for Jetson and Ubuntu deployments.
+## Requirements
+- Python 3.9+ on Linux (Ubuntu/Jetson) or Windows 11.
+- USB/CSI camera supported by OpenCV.
+- `pip install -r requirements.txt` (installs `ultralytics`, `opencv-python`, `numpy`).
+- Optional ROS 1 publishing: `rospy` and `std_msgs` available in the environment.
+- Jetson note: if `opencv-python` fails to install from wheels, use the preinstalled `python3-opencv` and run `pip install --no-deps ultralytics numpy`.
 
-## Key Enhancements
+## Setup
+1. From this folder, create and activate a virtual environment (recommended):
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+   ```
+2. Install dependencies and let Ultralytics pull the default YOLO weights on first run:
+   ```bash
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+3. Plug in the camera. For Jetson/CSI cams you can use a GStreamer string via `--pipeline` instead of `--camera`.
 
-1. **Multimodal Safety Advisor**
-   - Added `autonomy/ai/advisor.py`, a BLIP + FLAN-T5 powered module that captions each frame, reasons over perception metadata, and issues traffic-law-compliant directives.
-   - The advisor enforces emergency stops when high hazard levels are detected or when regulated objects (`stop sign`, `traffic light`, `person`, `bicycle`) appear in view.
+## Running the pilot
+Run from this folder so imports resolve:
+```bash
+python -m autonomy.pilot --model yolov8n.pt --device auto --camera 0 --display --log actuator_log.jsonl
+```
+- `--device auto` lets Ultralytics pick CUDA on Jetson/desktop if available or fall back to CPU.
+- Use `--pipeline "nvarguscamerasrc ! ... ! appsink"` for Jetson CSI cameras.
+- Add `--ros-topic /actuators` to publish `[steer, throttle, brake]` as a `Float32MultiArray` when `rospy` is present.
 
-2. **Command Parsing Pipeline**
-   - Introduced `autonomy/ai/command_interface.py` to normalize operator inputs such as “drive 2 m forward” or “turn right”.
-   - Commands can be injected once at launch (`--command`) or streamed live from a file (`--command-file`).
+## Expected behavior
+- Maintains a cruise throttle (default 0.35) when the view is clear.
+- Steers away from detected objects using their weighted horizontal offset.
+- Reduces throttle as the largest detection fills more of the frame and applies full brake once it crosses the brake area threshold.
+- Logs JSONL actuator commands when `--log` is provided and draws overlays when `--display` is set (press `q` to exit).
 
-3. **Navigator + Controller Updates**
-   - `Navigator.plan` now consumes high-level commands, biasing turns, regulating speed, and surfacing goal context metadata.
-   - The controller honors enforced stops so the scooter brakes immediately when the advisor flags a hazard or the operator issues a stop command.
-
-4. **Pilot Orchestration**
-   - `AutonomyPilot` coordinates the new components, exports JSON state files for dashboards, and prints actuator commands alongside advisor directives.
-   - Visualization overlays now display both actuator values and the latest advisory text for easier debugging.
-
-5. **Tooling + Documentation**
-   - Updated dependency checks and `requirements.txt` for Torch and Transformers workloads.
-   - Refreshed the primary README and supplied this report for traceability.
-   - Added `setup_scroot.py`, a turnkey bootstrapper that provisions a virtual environment and downloads pretrained weights.
-
-## Testing Notes
-
-- Runtime validation within this environment is limited because GPU-accelerated models (YOLO, BLIP, PyTorch) are not available. The code has been structured to fail fast if required packages are missing, and the launcher explicitly checks for them before execution.
-
-## Next Steps
-
-- Integrate localization and mapping data to fulfill “drive to this location” requests with metric precision.
-- Explore quantized or distilled VLM/LLM variants for faster Jetson deployments.
-- Add telemetry unit tests or simulation harnesses once model dependencies can be stubbed or mocked.
+## Common errors and fixes
+- **Unable to open camera**: verify the index (`--camera 0`/`1`), check `/dev/video*` permissions on Linux, or supply a valid GStreamer `--pipeline`.
+- **YOLO weight download fails**: ensure internet access or pre-download a `.pt` file and pass its path to `--model`.
+- **Torch/Ultralytics installs slowly on Jetson**: prefer a swapfile and keep `--device cpu` if CUDA is unavailable.
+- **ROS import error**: remove `--ros-topic` or install `rospy`/`std_msgs` from your ROS distribution.
+- **No GUI window in headless sessions**: omit `--display` and rely on the actuator log instead.
