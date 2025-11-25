@@ -1,36 +1,43 @@
-# Development Report
+# Navigator Program Report
 
-## Objective
-Extend the autonomous scooter pilot with a multimodal large-model co-driver, a natural-language command interface, and accompanying documentation while keeping the stack ready for Jetson and Ubuntu deployments.
+## Purpose
+This navigator consumes an MP4 video, performs lightweight YOLO detection, and produces actuator outputs (steering \[-1, 1\], throttle \[0, 1\], brake \[0, 1\]) suitable for a scooter or rover. It renders bounding boxes and actuator indicators on the video stream and can stream comma-separated actuator values to an Arduino.
 
-## Key Enhancements
+## Architecture
+- **`navigator.py`**
+  - Loads a YOLO model (default `yolov8n.pt`) on CPU or GPU.
+  - Runs an initial calibration window (default 3 seconds) outputting zeroed actuators.
+  - Processes each frame to compute actuator values based on detection area and offset from the frame center.
+  - Sends actuator triples over serial when a port is provided and logs values for monitoring.
+  - Generates overlays with bounding boxes, actuator bars (throttle/brake), and a steering direction line.
+  - Optional GUI display (`--display`) and MP4 recording (`--output`).
 
-1. **Multimodal Safety Advisor**
-   - Added `autonomy/ai/advisor.py`, a BLIP + FLAN-T5 powered module that captions each frame, reasons over perception metadata, and issues traffic-law-compliant directives.
-   - The advisor enforces emergency stops when high hazard levels are detected or when regulated objects (`stop sign`, `traffic light`, `person`, `bicycle`) appear in view.
+## Actuation Strategy
+- **Cruise:** Base throttle of 0.35 keeps forward motion.
+- **Steering:** Objects offset from center induce steering away, scaled by object area (larger obstacles steer more).
+- **Throttle:** Reduced proportionally to detected obstacle area when above the caution threshold.
+- **Brake:** Applies braking within the caution zone; full brake and stop when object area exceeds the stop threshold.
+- **Safety:** Calibration keeps actuators at zero for the first few seconds to allow hardware alignment.
 
-2. **Command Parsing Pipeline**
-   - Introduced `autonomy/ai/command_interface.py` to normalize operator inputs such as “drive 2 m forward” or “turn right”.
-   - Commands can be injected once at launch (`--command`) or streamed live from a file (`--command-file`).
+## Dependencies & Setup
+- Install with the included `setup.sh` (Python 3.8 compatible). Key packages: `ultralytics`, `opencv-python-headless`, `numpy`, `pyserial`.
+- Optional: ensure `ffmpeg` is available on the system for MP4 decoding if your OpenCV build requires it.
 
-3. **Navigator + Controller Updates**
-   - `Navigator.plan` now consumes high-level commands, biasing turns, regulating speed, and surfacing goal context metadata.
-   - The controller honors enforced stops so the scooter brakes immediately when the advisor flags a hazard or the operator issues a stop command.
+## Running
+Example headless run that saves the overlay video:
+```bash
+python3 navigator.py --input input.mp4 --output overlay.mp4 --device cpu
+```
 
-4. **Pilot Orchestration**
-   - `AutonomyPilot` coordinates the new components, exports JSON state files for dashboards, and prints actuator commands alongside advisor directives.
-   - Visualization overlays now display both actuator values and the latest advisory text for easier debugging.
+Example with Arduino output and live window:
+```bash
+python3 navigator.py --input input.mp4 --serial-port /dev/ttyACM0 --display --device cuda:0
+```
+Press `q` to exit when the window is enabled.
 
-5. **Tooling + Documentation**
-   - Updated dependency checks and `requirements.txt` for Torch and Transformers workloads.
-   - Refreshed the primary README and supplied this report for traceability.
-
-## Testing Notes
-
-- Runtime validation within this environment is limited because GPU-accelerated models (YOLO, BLIP, PyTorch) are not available. The code has been structured to fail fast if required packages are missing, and the launcher explicitly checks for them before execution.
-
-## Next Steps
-
-- Integrate localization and mapping data to fulfill “drive to this location” requests with metric precision.
-- Explore quantized or distilled VLM/LLM variants for faster Jetson deployments.
-- Add telemetry unit tests or simulation harnesses once model dependencies can be stubbed or mocked.
+## Output Format
+Each processed frame emits:
+```
+<steering>,<throttle>,<brake>\n
+```
+The same values are displayed at the top of the overlay alongside actuator bars and steering indicator lines.
