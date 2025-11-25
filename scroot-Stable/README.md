@@ -1,120 +1,47 @@
-# Autonomous Scooter Pilot
+# Minimal Autonomous Navigator
 
-This package contains a self-contained autonomous driving stack tailored for lightweight vehicles such as scooters. The system is designed to run on NVIDIA Jetson devices as well as standard Ubuntu 24.04 laptops, using a single USB camera for perception. It exposes raw actuator values (`steer`, `throttle`, `brake`) that you can feed directly into your hardware interface. All commands below assume you are inside the `scroot` directory.
+This project runs a lightweight YOLO model over an MP4 file (or any OpenCV-readable source), mimicking a live camera feed. It prints actuator outputs in the format `(steering, throttle, brake)` on every frame, paints those values on the overlay, and streams them to an Arduino if a serial port is provided. The first three seconds of operation emit `(0.000, 0.000, 0.000)` for calibration before autonomous driving begins.
 
-## Features
+## Requirements
+- Python 3.8+
+- FFmpeg and GL libraries for OpenCV video decoding (`ffmpeg`, `libgl1`, `libglib2.0-0` on Debian/Ubuntu/WSL)
+- Optional NVIDIA GPU with CUDA if you want GPU inference (`--device cuda:0`)
 
-- Camera ingestion pipeline compatible with any USB camera supported by OpenCV.
-- Real-time object detection powered by Ultralytics YOLO models (default: `yolov8n.pt`).
-- Hybrid navigation that fuses obstacle density analysis with natural-language operator goals.
-- Safety-aware control layer that outputs normalized actuator commands, brakes for hazards, and honors enforced stops.
-- Optional multimodal advisor (BLIP + FLAN-T5) that captions the scene and issues traffic-law-compliant directives ("use the bike lane", "yield", "slow down").
-- Command parser that understands phrases such as "drive to the plaza", "drive 2 m forward", or "turn right" and feeds them into the navigator.
-- Structured state export (`logs/command_state.json`, `logs/advisor_state.json`) for telemetry, remote supervision, or UI dashboards.
-- Modular design that allows future sensors (ultrasonic, LiDAR, depth) to feed into the navigator without architectural changes.
+## One-command setup
 
-## Quick Start
+### Generic Linux / Jetson
+```bash
+(cd scroot && bash setup.sh)
+```
 
-1. **Run the bootstrapper** (creates a virtual environment and downloads models):
+### WSL
+```bash
+(cd scroot && bash setup_wsl.sh)
+```
 
-   ```bash
-   python setup_scroot.py
-   ```
+Both scripts install Ultralytics YOLO, OpenCV, NumPy, and PySerial; the WSL script also prepares a virtual environment and grabs the correct Torch build for CPU or CUDA.
 
-   The script installs all Python dependencies into `.venv/`, caches the default YOLOv8, BLIP, and FLAN checkpoints under `models/`, and prepares runtime directories. Add `--skip-models` if you want to reuse previously downloaded weights.
+## Running the navigator
 
-2. **Activate the environment** created by the bootstrapper:
+After installing dependencies (and activating `.venv` if you used `setup_wsl.sh`), run:
 
-   ```bash
-   source .venv/bin/activate
-   ```
+```bash
+python scroot/navigator.py --input /path/to/video.mp4 --display --serial-port /dev/ttyACM0
+```
 
-3. **Connect your camera** via USB and determine its index (usually `0`).
+Key behaviors:
+- Prints `(steering, throttle, brake)` each frame; during the initial 3 seconds, it prints `(0.000, 0.000, 0.000)` for calibration.
+- Overlays detections plus actuator bars and the tuple at the top of the video window.
+- Sends the same tuple over serial as `steering,throttle,brake\n` when `--serial-port` is provided.
+- Press `q` to exit the overlay window.
 
-4. **Launch the pilot** using the unified launcher:
+Useful flags:
+- `--device cpu` (default) or `--device cuda:0`
+- `--model yolov8n.pt` (default lightweight YOLO)
+- `--output overlay.mp4` to save the annotated video
+- `--calibration 3.0` to adjust the zero-output duration
+- `--baud-rate 115200` to match your Arduino settings
+- Omit `--display` for headless runs (the actuator tuple still prints to stdout and over serial)
 
-   ```bash
-   python autonomy_launcher.py --camera 0 --visualize --command "drive 2 m forward"
-   ```
-
-   The launcher checks dependencies, starts the camera, runs perception and control, and prints actuator commands together with the advisor verdict:
-
-   ```text
-   time=3.42s steer=+0.120 throttle=0.320 brake=0.000 directive="stay in bike lane" goal="drive 2 m forward"
-   ```
-
-   Press `q` in the visualization window or send `Ctrl+C` to exit.
-
-### Bootstrap Script Options
-
-`setup_scroot.py` accepts a few helpful flags:
-
-| Flag | Purpose |
-| --- | --- |
-| `--venv PATH` | Place the virtual environment in a custom directory (default: `./.venv`). |
-| `--models-dir PATH` | Choose where BLIP/FLAN checkpoints are stored (default: `./models`). |
-| `--skip-models` | Install Python packages but reuse previously downloaded model weights. |
-| `--upgrade` | Recreate the virtual environment from scratch before installing dependencies. |
-
-## Configuration Options
-
-The launcher accepts several runtime flags:
-
-| Flag | Description | Default |
-| --- | --- | --- |
-| `--camera` | Camera index or video path | `0` |
-| `--width` / `--height` | Capture resolution | `1280x720` |
-| `--fps` | Target frame rate | `30` |
-| `--model` | YOLO model file | `yolov8n.pt` |
-| `--confidence` | Detection confidence threshold | `0.3` |
-| `--iou` | Detection IoU threshold | `0.4` |
-| `--visualize` | Enable on-screen overlays | Disabled |
-| `--log-dir` | Directory for visualizations and state dumps | `logs/` |
-| `--command` | Initial natural-language goal (e.g. `"drive to the park"`) | None |
-| `--command-file` | Path to a UTF-8 text file that can be updated with new commands | None |
-| `--disable-advisor` | Skip loading the multimodal advisor | Enabled |
-| `--advisor-image-model` | Hugging Face name for the BLIP image encoder | `Salesforce/blip-image-captioning-base` |
-| `--advisor-language-model` | Hugging Face name for the language model | `google/flan-t5-small` |
-| `--advisor-device` | Force the device used by the advisor (`cpu`, `cuda`, etc.) | Auto-detect |
-| `--advisor-state` | JSON file capturing the latest advisor directive | `logs/advisor_state.json` |
-| `--command-state` | JSON file capturing the parsed command | `logs/command_state.json` |
-
-## How It Works
-
-1. **CameraSensor** (`autonomy/sensors/camera.py`) continuously streams frames.
-2. **ObjectDetector** (`autonomy/perception/object_detection.py`) identifies obstacles using YOLO and returns bounding boxes.
-3. **CommandInterface** (`autonomy/ai/command_interface.py`) parses operator phrases and exposes structured goals.
-4. **Navigator** (`autonomy/planning/navigator.py`) evaluates obstacle density and the active goal to produce a steering bias, target speed, and goal context.
-5. **SituationalAdvisor** (`autonomy/ai/advisor.py`) captions the scene, blends detection metadata with the goal, and emits a short instruction; it can enforce a full stop for compliance events such as stop signs or pedestrians.
-6. **Controller** (`autonomy/control/controller.py`) converts navigation decisions into smoothed actuator commands, prioritizing braking when hazards or enforced stops occur.
-7. **AutonomyPilot** (`autonomy/pilot.py`) orchestrates these components, exports telemetry, and prints raw actuator values for integration with your vehicle controller.
-
-## Command Interface Tips
-
-- Update the file passed with `--command-file` to issue live instructions. Each save triggers a re-parse.
-- Supported phrases include:
-  - `drive 5 m forward`
-  - `drive to the loading dock`
-  - `turn around`
-  - `turn left`
-  - `stop`
-- Any unrecognized text is still passed to the advisor so it can reason about free-form goals.
-
-## Safety Advisor Behavior
-
-The advisor enforces conservative behavior:
-
-- Stops when YOLO detects `stop sign`, `traffic light`, `person`, or `bicycle` directly ahead.
-- Prioritizes sidewalks or bike lanes in its textual guidance.
-- Raises braking priority when the navigator reports a high hazard score (>0.85 by default).
-- Exports human-readable directives and scene captions for auditing.
-
-## Extending the System
-
-- **Additional sensors:** Feed their obstacle cues into `Navigator.plan` by augmenting the occupancy map.
-- **Custom models:** Provide a different YOLO checkpoint via `--model` or swap the advisor models with lighter or heavier variants.
-- **Vehicle integration:** Map the normalized actuator outputs to your scooter's control API. For example, scale `steer` to handlebar servo angles and translate `throttle`/`brake` to PWM duty cycles.
-
-## Safety Notice
-
-This codebase is intended for research and prototyping. Always test in a controlled environment, keep a human operator ready to take over, and comply with local regulations for sidewalk and bike-lane operation.
+## Safety note
+This code is for offline experimentation. Always validate outputs in a controlled setting before connecting to physical hardware.
